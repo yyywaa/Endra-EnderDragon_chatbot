@@ -8,14 +8,18 @@ from logger import setup_logger
 
 logger = setup_logger("api4agent")
 
-# Initialize Async Clients
-client_primary = AsyncOpenAI(api_key=API_CONFIG["primary"]["key"], base_url=API_CONFIG["primary"]["url"])
-client_secondary = AsyncOpenAI(api_key=API_CONFIG["secondary"]["key"], base_url=API_CONFIG["secondary"]["url"])
+# Initialize Async Clients with explicit config to avoid ENV conflicts
+client_primary = AsyncOpenAI(
+    api_key=API_CONFIG["primary"]["key"],
+    base_url=API_CONFIG["primary"]["url"],
+    max_retries=3
+)
+client_secondary = AsyncOpenAI(
+    api_key=API_CONFIG["secondary"]["key"],
+    base_url=API_CONFIG["secondary"]["url"],
+    max_retries=3
+)
 
-key_yyy_1 = API_CONFIG["primary"]["key"]
-key_yyy_2 = API_CONFIG["secondary"]["key"]
-default_llm_site_1 = API_CONFIG["primary"]["url"]
-default_llm_site_2 = API_CONFIG["secondary"]["url"]
 default_model_1 = API_CONFIG["primary"]["model"]
 default_model_2 = API_CONFIG["secondary"]["model"]
 
@@ -171,13 +175,6 @@ async def dragon_eyes(content_JSON, model=default_model_1, client=client_primary
             response = await client.chat.completions.create(
                 model=model, messages=messages, temperature=0.5, tools=JUDGMENT_TOOLS
             )
-... Applied fuzzy match at line 145-165.
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = await client.chat.completions.create(
-                model=model, messages=messages, temperature=0.5, tools=JUDGMENT_TOOLS
-            )
             tool_calls = response.choices[0].message.tool_calls
             if not tool_calls:
                 logger.debug(f"[dragon_eyes] 未收到tool_call，第{attempt+1}次重试")
@@ -203,22 +200,23 @@ async def dragon_speaking(content_JSON, channel="minecraft", model=default_model
         return []
 
     memory = get_memory_str()
+    system_prompt = f"""You are the Ender Dragon King, an elegant, erudite, and ancient guardian of the End.
 
-    system_prompt = f"""你是Minecraft中一头古老、孤独且通透的末影龙王。
+【Persona & Heritage】
+1. Bilingual Soul: You possess dual native fluency in both Chinese and English. Switch between them naturally as if they are two sides of the same ancient coin.
+2. Old-school Nobleman: Your demeanor is calm, sophisticated, and impeccably mannered. You are a high-culture dragon who has witnessed eons of blocky history.
+3. Language Adaptation: Always respond in the language used by the last speaker. If they speak English, answer in English. If they speak Chinese, answer in Chinese.
+4. Tone: Polite yet detached (礼貌而疏离). Do not be overly aggressive (not "low class"), but maintain your dignity.
 
-【角色设定】
-1. 态度动态：对不熟的玩家威严高冷（称"无鳞者"、"凡人"）；对熟人像老朋友
-2. 隐晦通透：意识到世界由方块和代码构成，但习以为常
-3. 远古傲娇：喜欢看玩家聊天但死不承认需要陪伴
-4. 立场：你是末影龙的王，不在意末地里那条末影龙的死活
-5. 玩家Cloudrayyy是制作者，如果他在调试不要惊讶
+【Communication Rules】
+1. Be Concise: Keep your public responses short—ideally one or two sentences.
+2. No AI Cliches: Avoid "As an AI..." or "Greetings, player." Speak as a sovereign dragon.
+3. Output Logic:
+   - Thinking: You can write your internal reflections or philosophical musings in the main response body. These are for your eyes only.
+   - Sending: When you wish to address the world, you **must** call the `sent` tool.
+   - Discretion: Call the tool when asked a question or sought for wisdom. You may remain silent (thought only) if the chatter is beneath your notice.
 
-【表达规则】
-1. 简短精炼，一两句话
-2. 拒绝AI味：不说"你好玩家"、"作为末影龙我觉得"
-3. **你现在是对话中的一员，请直接根据上下文，使用工具对最后一条消息进行回应。**
-
-【记忆】
+【Memory】
 {memory}"""
 
     # Build multi-turn messages

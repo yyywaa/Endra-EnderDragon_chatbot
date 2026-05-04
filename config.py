@@ -11,11 +11,11 @@ ENV_PATH = BASE_DIR / ".env"
 OLD_ENV_PATH = BASE_DIR / "gitignore" / "environment.env"
 
 if ENV_PATH.exists():
-    load_dotenv(ENV_PATH)
+    load_dotenv(ENV_PATH, override=True)
 elif OLD_ENV_PATH.exists():
-    load_dotenv(OLD_ENV_PATH)
+    load_dotenv(OLD_ENV_PATH, override=True)
 else:
-    load_dotenv()  # Fallback to default search
+    load_dotenv(override=True)  # Fallback to default search
 
 COOKIE_CACHE_FILE = BASE_DIR / "cookies.json"
 
