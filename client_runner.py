@@ -15,11 +15,12 @@ logger = setup_logger("client_runner")
 class ClientRunner:
     def __init__(self, room: Optional[str] = None):
         self.room = room or BOT_CONFIG["room"]
+        self.bot_username = BOT_CONFIG.get("username", "EnderDragon")
         self.msg_buffer = []
+        self.memory_buffer = []
         self.processed_msg_ids = set()
         self.last_reply_time = 0.0
         self.msg_count = 0
-        self.memory_check_count = 0
 
         self.ws_base = SERVER_CONFIG["ws_base"]
         self.heartbeat_interval = CONNECTION_CONFIG["heartbeat_interval"]
@@ -44,6 +45,8 @@ class ClientRunner:
             return False
         if not self._is_message_fresh(msg):
             return False
+        if msg.get("sender_username") == self.bot_username:
+            return False
         return True
 
     def _is_on_cooldown(self) -> bool:
@@ -58,9 +61,14 @@ class ClientRunner:
 
     def _trim_buffer(self):
         if len(self.msg_buffer) > self.buffer_max:
-            removed = self.msg_buffer[:-self.buffer_max]
             self.msg_buffer = self.msg_buffer[-self.buffer_max:]
-            logger.debug(f'[Buffer] 裁剪{len(removed)}条，当前{len(self.msg_buffer)}条')
+        
+        # Limit processed_msg_ids to prevent memory leak
+        if len(self.processed_msg_ids) > 1000:
+            # Convert to list to slice, then back to set. This is a bit slow but safe.
+            # Alternatively, use an OrderedDict or similar if performance matters.
+            l = list(self.processed_msg_ids)
+            self.processed_msg_ids = set(l[-500:])
 
     async def _send_message(self, ws, content: str):
         try:
@@ -77,12 +85,11 @@ class ClientRunner:
                 logger.info(f"[Bot] 删除消息: {action['msg_id']} (channel: {action['channel']})")
 
     async def _process_latest(self, ws, last_msg: dict):
-        if last_msg.get("sender_username") == "EnderDragon":
-            return
         if not self._should_process(last_msg):
             return
+        
         if self._is_on_cooldown():
-            logger.debug(f"[Cooldown] 冷却中，跳过回复")
+            logger.debug(f"[Cooldown] 冷却中，跳过回复: {last_msg.get('msg_id')}")
             self.processed_msg_ids.add(last_msg["msg_id"])
             return
 
@@ -103,13 +110,22 @@ class ClientRunner:
             self.last_reply_time = time.time()
 
     async def _check_memory_summary(self):
-        self.memory_check_count += 1
-        if self.memory_check_count >= self.memory_interval:
-            self.memory_check_count = 0
-            logger.info(f"[Memory] 已处理{self.msg_count}条，正在总结...")
-            # Await the async AI call
-            await api4agent.memory_conclude(self.msg_buffer)
-            logger.info("[Memory] 总结完成")
+        if len(self.memory_buffer) >= self.memory_interval:
+            count = len(self.memory_buffer)
+            messages_to_summarize = list(self.memory_buffer)
+            self.memory_buffer = [] # Clear immediately to avoid redundant triggers
+            
+            logger.info(f"[Memory] 积压{count}条消息，启动后台总结任务...")
+            
+            # Run conclusion in background so it doesn't block heartbeat/processing
+            async def run_summary():
+                try:
+                    await api4agent.memory_conclude(messages_to_summarize)
+                    logger.info("[Memory] 后台总结完成")
+                except Exception as e:
+                    logger.error(f"[Memory] 后台总结失败: {e}")
+
+            asyncio.create_task(run_summary())
 
     async def run(self):
         retry_attempt = 0
@@ -139,21 +155,36 @@ class ClientRunner:
                                 last_ping = time.time()
 
                             msg_data = json.loads(raw_msg)
-                            valid = self._extract_valid_messages(msg_data)
-                            if not valid:
+                            valid_batch = self._extract_valid_messages(msg_data)
+                            
+                            new_messages = []
+                            for m in valid_batch:
+                                m_id = m.get("msg_id")
+                                # Skip if already in buffer or processed
+                                if m_id and any(ex.get("msg_id") == m_id for ex in self.msg_buffer):
+                                    continue
+                                new_messages.append(m)
+                            
+                            if not new_messages:
                                 continue
 
-                            self.msg_count += len(valid)
-                            self.msg_buffer.extend(valid)
+                            self.msg_count += len(new_messages)
+                            self.msg_buffer.extend(new_messages)
+                            self.memory_buffer.extend(new_messages)
                             self._trim_buffer()
 
-                            await self._process_latest(ws, self.msg_buffer[-1])
+                            # Process all new messages in this batch
+                            for m in new_messages:
+                                await self._process_latest(ws, m)
+                            
                             await self._check_memory_summary()
 
                         except json.JSONDecodeError:
                             logger.error(f"[Parse] JSON错误: {raw_msg[:50]}")
                         except Exception as e:
                             logger.error(f"[Process] 处理异常: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
 
             except Exception as e:
                 delay = min(self.base_delay * (2 ** retry_attempt), self.max_delay)

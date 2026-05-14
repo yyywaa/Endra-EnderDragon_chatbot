@@ -3,10 +3,13 @@ import os
 import time
 import json
 from typing import Optional
-from config import API_CONFIG
+from config import API_CONFIG, BOT_CONFIG
 from logger import setup_logger
 
 logger = setup_logger("api4agent")
+
+# Get bot username from config
+BOT_NAME = BOT_CONFIG.get("username", "EnderDragon")
 
 # Initialize Async Clients with explicit config to avoid ENV conflicts
 client_primary = AsyncOpenAI(
@@ -162,7 +165,7 @@ async def dragon_eyes(content_JSON, model=default_model_1, client=client_primary
 
     # Map each history message to a separate user message
     for msg in trimmed:
-        role = "assistant" if msg["sender_username"] == "EnderDragon" else "user"
+        role = "assistant" if msg["sender_username"] == BOT_NAME else "user"
         content = f"{msg['sender_username']}: {msg['text']}"
         messages.append({"role": role, "content": content})
 
@@ -223,7 +226,7 @@ async def dragon_speaking(content_JSON, channel="minecraft", model=default_model
     messages = [{"role": "system", "content": system_prompt}]
     
     for msg in trimmed:
-        role = "assistant" if msg["sender_username"] == "EnderDragon" else "user"
+        role = "assistant" if msg["sender_username"] == BOT_NAME else "user"
         content = f"{msg['sender_username']}: {msg['text']}"
         messages.append({"role": role, "content": content})
 

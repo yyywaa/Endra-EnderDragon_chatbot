@@ -55,7 +55,7 @@ CONNECTION_CONFIG = {
     "max_retry_delay": 30,
     "heartbeat_interval": 30,
     "message_buffer_max": 50,
-    "memory_interval": 75,
+    "memory_interval": 50,
     "reply_cooldown": 15,
 }
 
