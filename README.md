@@ -1,43 +1,58 @@
-# EnderDragon_agent 正式版重构
+# Endra connector（重构版）
 
-## 项目地址
-[Endra](https://github.com/yyywaa/EnderDragon_agent)
+coffeeroom 聊天室 / Minecraft 服务器中的末影龙聊天机器人。
 
-## 关于原来的一坨
+**架构**：本仓库已退化为薄连接层——只保留 coffeeroom 协议处理（鉴权、心跳、缓冲、去重、冷却），"大脑"（人设、记忆、回复决策、主动发言）全部委托给 [alive-buddy](https://github.com/yyywaa/alive-buddy)。重构依据见 alive-buddy 仓库 `docs/ENDRA_MIGRATION.md`。
 
-我们先不讨论关于网络处理的问题，我们只讨论agent架构就存在很大的问题，几乎可以用原始来形容以前的做法。强依赖判断模型的输出，不仅不够智能稳定，还存在注入风险。
-本仓库的代码实现依赖于[chatroom](https://github.com/salmonarg/chatroom),感谢khangai为本项目作出的贡献，让我们不必更多考虑关于session鉴权的问题。
+```
+coffeeroom (wss://room.caffeine.ink)
+   ↑↓ ws (Cookie 鉴权)
+endra-connector (本仓库)
+   ↑↓ ws  ws://alive-buddy:3000/v1/chat        投递聊天消息（silent 批处理）
+   ↑↓ http POST /webhook                       接收 agent 发言并转发进聊天室
+alive-buddy API (Fastify, :3000)  +  ML sidecar (FastAPI, :8001)
+```
 
-## 项目介绍
+## 目录结构
 
-本仓库实现了一个在minecraft服务器以及聊天室中活跃的末影龙聊天机器人。
+```
+connector/
+├── main.py            # 入口：webhook → buddy init/chat ws → 房间 ws
+├── room_client.py     # coffeeroom 连接层：过滤/缓冲/冷却/silent 批处理/重连
+├── buddy_client.py    # alive-buddy 客户端：init / chat ws 投递 / status / debug
+├── webhook.py         # POST /webhook 接收 agent 发言
+├── session_manager.py # coffeeroom 鉴权（oa_ticket 换 cookie、OAT 自动续签）
+├── config.py          # 全部走 env
+└── logger.py
+tests/                 # 消息过滤、批次 silent 标记、冷却窗口、断线重 init
+scripts/e2e_headless.py  # 无头端到端验证（不连 coffeeroom）
+Dockerfile             # connector 镜像
+docker-compose.yml     # connector + alive-buddy + ml-sidecar
+```
 
-### 上下文处理
+## 部署
 
-对于每一条json，将会删减至仅包含以下字段（为防止上下文拥堵）：
-{
-"sender_username":"EnderDragon",
-"text":"Dragon roars.",
-"time":处理后的timestamp数据,
-"msg_id":"msg-6767676767676-abcde"
-}
-msg_id需要保留，方便agent调用工具删除一些自己的消息用。
+alive-buddy 仓库需与本仓库并排放置（compose 的 build context 指向 `../alive-buddy`）。
 
-### tool_call实现
+```bash
+cp .env.example .env  # 填入 coffeeroom 凭据与 LLM key
+docker compose build
+docker compose up -d ml-sidecar alive-buddy
 
-之前的双模型模式依旧可以沿用下来，但是判断模型只允许注册连接回复模型的工具：
+# 无头联调（可选，不连聊天室验证全链路）
+docker compose run --rm --no-deps --name endra-e2e \
+  -e WEBHOOK_PUBLIC_URL=http://endra-e2e:9199/webhook \
+  endra-connector python scripts/e2e_headless.py
 
-sent2brain:{"is_need_reply": boolean}
+docker compose up -d
+```
 
-而回复模型可以有这些工具：
+alive-buddy 的角色记忆与状态持久化在 `buddy-data` 卷（`data/characters`，SQLite），容器重建不失忆；但 session 是内存态，alive-buddy 重启后 connector 会自动重新 init。
 
-sent:{"msg_content": str, "channel": str}
-delete:{"msg_id": str, "channel": str}
-模型直接输出的内容不作捕获，仅仅作为思考链和调试工具。
+## 本地开发
 
-如此第一个判断模型的prompt大幅衰减，甚至都不需要赋予是否。
-
-以上均为输入格式json会转成openai格式进行传输。
-
-
-
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python -m unittest discover -s tests -v
+python -m connector.main
+```

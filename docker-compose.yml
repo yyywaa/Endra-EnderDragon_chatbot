@@ -1,0 +1,35 @@
+name: endra
+
+services:
+  ml-sidecar:
+    build:
+      context: ../alive-buddy
+      dockerfile: Dockerfile.ml
+    restart: unless-stopped
+
+  alive-buddy:
+    build:
+      context: ../alive-buddy
+      dockerfile: Dockerfile
+    environment:
+      PORT: "3000"
+      ML_SIDECAR_URL: http://ml-sidecar:8001
+      # 不部署 ChromaDB，L3 印象层自动禁用（日志中 connection refused 警告属预期）
+    volumes:
+      - buddy-data:/app/data/characters
+    depends_on:
+      - ml-sidecar
+    restart: unless-stopped
+
+  endra-connector:
+    build: .
+    env_file: .env
+    volumes:
+      # coffeeroom 会话 cookie 缓存（OAT 已失效时靠有效 cookie 自续签）
+      - ./secrets/cookies.json:/app/cookies.json
+    depends_on:
+      - alive-buddy
+    restart: unless-stopped
+
+volumes:
+  buddy-data:

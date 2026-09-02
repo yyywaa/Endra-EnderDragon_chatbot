@@ -1,29 +1,3 @@
-<<<<<<< HEAD
-### AL ###
-#Template for AL projects for Dynamics 365 Business Central
-#launch.json folder
-.vscode/
-#Cache folder
-.alcache/
-#Symbols folder
-.alpackages/
-#Snapshots folder
-.snapshots/
-#Testing Output folder
-.output/
-#Extension App-file
-*.app
-#Rapid Application Development File
-rad.json
-#Translation Base-file
-*.g.xlf
-#License-file
-*.flf
-#Test results file
-TestResults.xml
-
-__pycache__/
-=======
 # Python
 __pycache__/
 *.pyc
@@ -35,9 +9,6 @@ venv/
 .venv/
 pip-log.txt
 pip-delete-this-directory.txt
-.toast
-.lucid
-.replit
 
 # Environment variables
 .env
@@ -48,13 +19,13 @@ gitignore/
 *.log
 endra.log
 
-# Data/Memory
+# Data/Memory/Secrets
 memory/
 dragon_memory.txt
 cookies.json
+secrets/
 
 # IDEs
 .vscode/
 .idea/
 .DS_Store
->>>>>>> d6b8ad4 (release: Endra - first official version with async, logging, and docker)

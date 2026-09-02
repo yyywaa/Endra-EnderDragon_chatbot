@@ -1,0 +1,166 @@
+"""coffeeroom 连接层：鉴权/心跳/重连/缓冲/去重/冷却，消息投递给 alive-buddy。"""
+import asyncio
+import json
+import time
+from typing import Optional
+
+import websockets
+
+from .buddy_client import BuddyClient
+from .config import BOT_CONFIG, CONNECTION_CONFIG, SERVER_CONFIG
+from .logger import setup_logger
+from .session_manager import session_manager
+
+logger = setup_logger("room_client")
+
+
+class RoomClient:
+    def __init__(self, buddy: BuddyClient, room: Optional[str] = None):
+        self.buddy = buddy
+        self.room = room or BOT_CONFIG["room"]
+        self.bot_username = BOT_CONFIG.get("username") or "EnderDragon"
+        self.processed_msg_ids = set()
+        self.last_trigger_time = 0.0  # 上一次投递非 silent 消息的时间（成本护栏）
+
+        self.ws_base = SERVER_CONFIG["ws_base"]
+        self.heartbeat_interval = CONNECTION_CONFIG["heartbeat_interval"]
+        self.buffer_max = CONNECTION_CONFIG["message_buffer_max"]
+        self.reply_cooldown = CONNECTION_CONFIG["reply_cooldown"]
+        self.freshness_window = CONNECTION_CONFIG["freshness_window"]
+        self.base_delay = CONNECTION_CONFIG["initial_retry_delay"]
+        self.max_delay = CONNECTION_CONFIG["max_retry_delay"]
+
+        self._ws = None  # 当前房间 ws 连接，供 webhook 回头发言用
+
+    # ---- 消息过滤（沿用旧逻辑） ----
+
+    def _is_message_fresh(self, msg: dict) -> bool:
+        msg_time_raw = msg.get("timestamp")
+        if msg_time_raw is None:
+            return False
+        msg_time = int(msg_time_raw) // 1000
+        return (time.time() - msg_time) <= self.freshness_window
+
+    def _is_self(self, msg: dict) -> bool:
+        return msg.get("sender_username") == self.bot_username
+
+    def _is_duplicate(self, msg: dict) -> bool:
+        msg_id = msg.get("msg_id")
+        return bool(msg_id) and msg_id in self.processed_msg_ids
+
+    def _extract_valid_messages(self, msg_data) -> list:
+        if isinstance(msg_data, list):
+            return [m for m in msg_data if isinstance(m, dict) and "text" in m]
+        if isinstance(msg_data, dict) and "text" in msg_data:
+            return [msg_data]
+        return []
+
+    def _mark_processed(self, msg: dict):
+        msg_id = msg.get("msg_id")
+        if msg_id:
+            self.processed_msg_ids.add(msg_id)
+        if len(self.processed_msg_ids) > 1000:
+            self.processed_msg_ids = set(list(self.processed_msg_ids)[-500:])
+
+    def _is_on_cooldown(self) -> bool:
+        return (time.time() - self.last_trigger_time) < self.reply_cooldown
+
+    # ---- 批次处理：除最后一条外全部 silent，最后一条受冷却控制 ----
+
+    def _plan_batch(self, batch: list) -> list:
+        """返回 [(msg, silent)]。规则：
+        - 批次内除最后一条外全部 silent=True（只进记忆）
+        - 最后一条：消息过期或处于冷却期时 silent=True，否则 silent=False 触发 reAct
+        """
+        plan = []
+        last_index = len(batch) - 1
+        for i, m in enumerate(batch):
+            silent = True
+            if i == last_index and self._is_message_fresh(m) and not self._is_on_cooldown():
+                silent = False
+            plan.append((m, silent))
+        return plan
+
+    async def _deliver_batch(self, batch: list):
+        for m, silent in self._plan_batch(batch):
+            text = f"{m.get('sender_username')}: {m.get('text')}"
+            try:
+                await self.buddy.deliver(text, silent, user_id=m.get("sender_username") or "coffeeroom")
+            except Exception as e:
+                logger.error(f"[Deliver] 投递失败 (silent={silent}): {e}")
+            finally:
+                self._mark_processed(m)
+            if not silent:
+                self.last_trigger_time = time.time()
+                logger.info(f"[Trigger] 非静默投递: {text[:80]}")
+
+    # ---- 对聊天室发言（webhook 回调入口） ----
+
+    async def send_reply(self, content: str):
+        ws = self._ws
+        if ws is None:
+            logger.warning(f"[Bot] 房间未连接，丢弃发言: {content[:80]}")
+            return
+        try:
+            await ws.send(content)
+            logger.info(f"[Bot] 发送: {content}")
+        except Exception as e:
+            logger.error(f"[Bot] 发送失败: {e}")
+
+    # ---- 主循环 ----
+
+    async def run(self):
+        retry_attempt = 0
+
+        while True:
+            cookie = session_manager.get_session(force_refresh=False)
+            if cookie is None:
+                delay = min(self.base_delay * (2 ** retry_attempt), self.max_delay)
+                logger.warning(f"[Connection] 无法获取session，{delay}秒后重试... (attempt {retry_attempt})")
+                retry_attempt += 1
+                await asyncio.sleep(delay)
+                continue
+
+            ws_url = f"{self.ws_base}/{self.room}"
+            logger.info(f"[Connection] 连接: {ws_url}")
+
+            try:
+                async with websockets.connect(ws_url, additional_headers={"Cookie": cookie}) as ws:
+                    logger.info(f"[Connection] 已连接房间: {self.room}")
+                    last_ping = time.time()
+                    retry_attempt = 0
+                    self._ws = ws
+
+                    try:
+                        async for raw_msg in ws:
+                            try:
+                                if time.time() - last_ping > self.heartbeat_interval:
+                                    await ws.ping()
+                                    last_ping = time.time()
+
+                                msg_data = json.loads(raw_msg)
+                                valid_batch = self._extract_valid_messages(msg_data)
+
+                                new_messages = [
+                                    m for m in valid_batch
+                                    if not self._is_duplicate(m) and not self._is_self(m)
+                                ]
+                                if not new_messages:
+                                    continue
+
+                                await self._deliver_batch(new_messages)
+
+                            except json.JSONDecodeError:
+                                logger.error(f"[Parse] JSON错误: {raw_msg[:50]}")
+                            except Exception as e:
+                                logger.error(f"[Process] 处理异常: {e}")
+                                import traceback
+                                logger.error(traceback.format_exc())
+                    finally:
+                        self._ws = None
+
+            except Exception as e:
+                delay = min(self.base_delay * (2 ** retry_attempt), self.max_delay)
+                logger.error(f"[Connection] 连接断开: {e}，{delay}秒后尝试重连... (attempt {retry_attempt})")
+                retry_attempt += 1
+                await asyncio.sleep(delay)

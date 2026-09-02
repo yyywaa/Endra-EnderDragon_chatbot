@@ -1,6 +1,6 @@
 import logging
 import sys
-from config import LOG_CONFIG
+from .config import LOG_CONFIG
 
 def setup_logger(name: str):
     logger = logging.getLogger(name)

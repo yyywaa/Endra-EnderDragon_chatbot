@@ -4,7 +4,7 @@ import os
 import base64
 import requests
 from typing import Optional
-from config import BOT_CONFIG, SERVER_CONFIG, COOKIE_CACHE_FILE
+from .config import BOT_CONFIG, SERVER_CONFIG, COOKIE_CACHE_FILE
 
 
 class SessionManager:
