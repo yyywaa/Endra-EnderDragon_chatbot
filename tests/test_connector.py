@@ -637,6 +637,13 @@ class TestDragonVoice(unittest.TestCase):
                         "反面清单"):
             self.assertNotIn(removed, self.prompt, f"不该再有这种指定：{removed}")
 
+    def test_has_timeliness_section(self):
+        """滞后治理：过时的话不如不说（曾出现"先补答旧问题、再答当前问题"）。"""
+        self.assertIn("【时效 — 过时的话不如不说】", self.prompt)
+        self.assertIn("只对**当前最新**的话做反应", self.prompt)
+        self.assertIn("不要回头补答", self.prompt)
+        self.assertIn("已经作废的信息不要当结论用", self.prompt)
+
     def test_three_bottom_lines_kept(self):
         self.assertIn("三条底线不变", self.prompt)
         self.assertIn("不超过三句", self.prompt)
