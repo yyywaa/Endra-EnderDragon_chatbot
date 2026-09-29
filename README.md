@@ -142,19 +142,52 @@ curl -s -H "Cookie: session=<bot cookie>" https://room.caffeine.ink/api/online-u
 alive-buddy 仓库需与本仓库并排放置（compose 的 build context 指向 `../alive-buddy`）。
 
 ```bash
-cp .env.example .env  # 填入 coffeeroom 凭据与 LLM key
+# 0. 两个仓库并排 clone
+#    git clone https://github.com/yyywaa/Endra-EnderDragon_chatbot.git
+#    git clone https://github.com/yyywaa/alive-buddy.git
+
+# 1. 凭据
+cp .env.example .env       # 填 BOT_USERNAME / BOT_ACCESS_TOKEN / ROOM_NAME / LLM_API_KEY
+
+# 2. cookie 缓存挂载点：必须先建文件。
+#    若宿主机只有 secrets/ 目录，Docker 会把挂载点当成目录创建，
+#    connector 就再也写不进 cookies.json（会话无法自续签）。
+mkdir -p secrets && [ -f secrets/cookies.json ] || echo '{}' > secrets/cookies.json
+
+# 3. 构建（connector 镜像含 mcp SDK，用于 MCP_SERVERS）
 docker compose build
+
+# 4. 先起不需要聊天室凭据的两个服务
 docker compose up -d ml-sidecar alive-buddy
 
-# 无头联调（可选，不连聊天室验证全链路）
+# 5. 无头联调（不连 coffeeroom，验证 init/工具定义/发言回传全链路）
 docker compose run --rm --no-deps --name endra-e2e \
   -e WEBHOOK_PUBLIC_URL=http://endra-e2e:9199/webhook \
   endra-connector python scripts/e2e_headless.py
 
+# 6. 起 connector
 docker compose up -d
 ```
 
+上线后核对三件事：
+
+```bash
+docker compose logs --tail=50 endra-connector | grep -E "已注册工具|Presence|下发"
+#   ├─ [Tool] 已注册工具: crypto_price, fx_echo, moegirl_page, moegirl_search, wiki_lookup …
+#   └─ [Buddy] 下发 N 个工具定义 / [Presence] 房间 <room> 在线真人（N）…
+curl -s http://127.0.0.1:9100/health        # {"ok":true,"tools":[...]}
+
+# 工具回调自检（容器内直接打自己的端点）
+docker compose exec endra-connector python -c "
+import requests,json
+print(requests.post('http://127.0.0.1:9100/tools/call',
+      json={'name':'crypto_price','arguments':{'symbols':'btc'}},timeout=30).json()['content'])"
+```
+
 alive-buddy 的角色记忆与状态持久化在 `buddy-data` 卷（`data/characters`，SQLite），容器重建不失忆；但 session 是内存态，alive-buddy 重启后 connector 会自动重新 init。
+
+> 注意：connector 重启会重新 init session，人设/采样/记忆窗口等**改动需要重启才生效**（记忆按 `reassignSession` 继承，不会失忆）。
+
 
 ## 本地开发
 
