@@ -312,6 +312,21 @@ alive-buddy 的角色记忆与状态持久化在 `buddy-data` 卷（`data/charac
 | 大脑：脉搏、reAct、唤醒措辞、记忆摘要 | `docker compose logs -f alive-buddy` |
 | 主动发言的 ML 决策服务 | `docker compose logs -f ml-sidecar` |
 
+> **`docker compose` 必须在 compose 文件所在目录执行**（否则报 `no configuration file provided`）。
+> 部署目录是 `connector/`，所以要么先 `cd`，要么用下面这个脚本从任意目录调用：
+
+```bash
+cd /home/yyy/endra/connector          # ← 关键：compose 文件所在目录
+./scripts/logs.sh                     # 默认跟 connector 日志
+./scripts/logs.sh buddy -f            # 跟 alive-buddy（大脑）
+./scripts/logs.sh connector --since=10m
+./scripts/logs.sh ml                  # ML sidecar
+
+# 不想用 compose 也可以直接跟容器（从任意目录都行）
+docker logs -f endra-alive-buddy-1
+docker logs -f endra-endra-connector-1
+```
+
 常用姿势：
 
 ```bash
