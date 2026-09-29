@@ -97,6 +97,7 @@ class ToolHub:
         self._lock = asyncio.Lock()
         self.mcp_clients: List = []  # 由 mcp.register_mcp_tools 填充，用于关闭长连接
         self.guard = None  # connector.guard.ToolGuard，在 build_hub 里装配
+        self.guard_broken = False  # 审查层装配失败：受审工具按保守策略拒绝
 
     # ---- 注册与导出 ----
 
@@ -164,7 +165,11 @@ class ToolHub:
         args = arguments or {}
 
         # 模型审查层：白名单挡的是"机制上不可能"，这一层挡的是"机制合法但意图可疑"
-        if self.guard is not None and (tool.guarded or self.guard.should_review(name)):
+        needs_review = tool.guarded or (self.guard is not None and self.guard.should_review(name))
+        if self.guard_broken and needs_review:
+            logger.error(f"[Guard] 审查层不可用，拒绝受审工具 {name}")
+            return "安全审查层当前不可用，按保守策略拒绝这次调用。可以如实说明你暂时无法操作。"
+        if self.guard is not None and needs_review:
             verdict = await self.guard.review(name, args)
             if not verdict.allowed:
                 logger.warning(f"[Guard] 拒绝 {name}: {verdict.reason}")
@@ -204,12 +209,15 @@ async def build_hub(config: Optional[dict] = None) -> ToolHub:
 
     hub = ToolHub(config)
     try:
-        from ..guard import ToolGuard
         from ..conversation import conversation_log
+        from ..guard import ToolGuard
 
-        hub.guard = ToolGuard(config, conversation_provider=conversation_log.recent)
-    except Exception as e:  # 审查层装配失败不应让整个工具层不可用
-        logger.error(f"[Tool] 审查层装配失败，将不带审查运行: {e}")
+        # 注意用 hub.config 而不是形参 config：生产入口是 build_hub()，形参为 None
+        hub.guard = ToolGuard(hub.config, conversation_provider=conversation_log.recent)
+    except Exception as e:
+        # 装配失败绝不等于"放行"：受审工具一律按保守策略拒绝
+        logger.critical(f"[Tool] 审查层装配失败，受审工具将被拒绝执行: {e}")
+        hub.guard_broken = True
     register_native_tools(hub)
     register_shell_tool(hub)
     register_minecraft_tools(hub)

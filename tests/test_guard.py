@@ -351,3 +351,48 @@ class TestGuardOverRealHttp(unittest.TestCase):
         asyncio.run(hub.call("readonly_shell", {"command": "ls"}))
         user = next(m["content"] for m in self.seen[-1]["body"]["messages"] if m["role"] == "user")
         self.assertIn("alice: 帮我看看 README 里写了什么", user)
+
+
+class TestGuardAssemblyOnProductionPath(unittest.TestCase):
+    """生产入口是 build_hub()（无参）——这里必须真的装上审查层。
+
+    曾经的 bug：装配时用了形参 config 而不是 hub.config，无参调用时拿到 None，
+    于是审查层静默失效、工具照常执行（本机测试都显式传了配置，所以没覆盖到）。
+    """
+
+    def test_build_hub_without_arguments_attaches_guard(self):
+        async def scenario():
+            hub = await build_hub()
+            try:
+                self.assertIsNotNone(hub.guard, "无参 build_hub() 也必须装上审查层")
+                self.assertFalse(hub.guard_broken)
+                self.assertTrue(hub.guard.enabled)
+            finally:
+                await hub.aclose()
+
+        asyncio.run(scenario())
+
+    def test_broken_guard_denies_guarded_tools(self):
+        """装配失败时受审工具必须被拒，而不是放行。"""
+        async def scenario():
+            hub = ToolHub(guard_config())
+            hub.guard_broken = True
+            executed = []
+
+            async def handler(args):
+                executed.append(args)
+                return "不该执行"
+
+            hub.register(Tool(name="readonly_shell", description="d", parameters={},
+                              handler=handler, guarded=True, per_minute=0, per_day=0))
+            hub.register(Tool(name="moegirl_page", description="d", parameters={},
+                              handler=handler, per_minute=0, per_day=0))
+
+            blocked = await hub.call("readonly_shell", {"command": "date"})
+            self.assertIn("审查层当前不可用", blocked)
+            self.assertEqual(executed, [], "审查层坏了就不能执行受审工具")
+
+            # 不受审的只读工具不受影响
+            self.assertEqual(await hub.call("moegirl_page", {}), "不该执行")
+
+        asyncio.run(scenario())
