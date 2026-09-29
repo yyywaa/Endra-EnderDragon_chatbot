@@ -504,3 +504,60 @@ class TestMediaWikiProvider(unittest.TestCase):
             self.assertEqual(_env_json("TEST_BAD_JSON"), [])
         finally:
             os.environ.pop("TEST_BAD_JSON", None)
+
+
+class TestConfiguredSitesAreActuallyCallable(unittest.TestCase):
+    """回归：注册了不等于能调用。
+
+    曾经 bug：mediawiki 站点用 partial 绑定了 api_base/label，但没经过 _bind 注入 config，
+    于是生产里调用直接报 "missing 1 required positional argument: 'config'"。
+    这里通过 hub 真正调用一次（stub 掉网络层），确保参数链路完整。
+    """
+
+    def test_configured_mediawiki_tools_callable_through_hub(self):
+        calls = []
+
+        async def fake_json_get(url, params=None, timeout=None):
+            calls.append((url, params.get("action")))
+            if params.get("action") == "opensearch":
+                return ["末影", ["末影龙"], [""], ["http://x/1"]]
+            return {"query": {"pages": {"1": {"title": "末影龙", "extract": "末影龙是终界之主。"}}}}
+
+        original = native.json_get
+        native.json_get = fake_json_get
+        try:
+            config = tool_config(
+                enabled=True,
+                mediawiki_sites=[{"name": "mcwiki", "api_base": "http://x/api.php", "label": "Minecraft Wiki"}],
+                moegirl_enabled=False, wiki_enabled=False, crypto_enabled=False,
+                per_minute=0, per_day=0, daily_total=0,
+            )
+            hub = ToolHub(config)
+            native.register_native_tools(hub)
+
+            search = asyncio.run(hub.call("mcwiki_search", {"query": "末影"}))
+            self.assertIn("末影龙", search)
+            self.assertNotIn("执行失败", search)
+
+            page = asyncio.run(hub.call("mcwiki_page", {"title": "末影龙"}))
+            self.assertIn("终界之主", page)
+            self.assertNotIn("执行失败", page)
+            self.assertEqual([a for _, a in calls], ["opensearch", "query"])
+        finally:
+            native.json_get = original
+
+    def test_moegirl_tools_callable_through_hub(self):
+        async def fake_json_get(url, params=None, timeout=None):
+            return {"query": {"pages": {"1": {"title": "初音未来", "extract": "初音未来是……"}}}}
+
+        original = native.json_get
+        native.json_get = fake_json_get
+        try:
+            config = tool_config(enabled=True, moegirl_enabled=True, wiki_enabled=False,
+                                 crypto_enabled=False, mediawiki_sites=[],
+                                 per_minute=0, per_day=0, daily_total=0)
+            hub = ToolHub(config)
+            native.register_native_tools(hub)
+            self.assertIn("初音未来", asyncio.run(hub.call("moegirl_page", {"title": "初音未来"})))
+        finally:
+            native.json_get = original

@@ -482,7 +482,7 @@ def register_native_tools(hub: ToolHub):
                 "query": {"type": "string", "description": "关键词"},
                 "limit": {"type": "integer", "description": "返回数量，默认 5"}},
                 "required": ["query"]},
-            handler=partial(mediawiki_search, api_base=api_base, label=label),
+            handler=bind(partial(mediawiki_search, api_base=api_base, label=label)),
         ))
         hub.register(Tool(
             name=f"{name}_page",
@@ -490,7 +490,7 @@ def register_native_tools(hub: ToolHub):
             parameters={"type": "object", "properties": {
                 "title": {"type": "string", "description": "条目名，建议先搜准确"}},
                 "required": ["title"]},
-            handler=partial(mediawiki_page, api_base=api_base, label=label),
+            handler=bind(partial(mediawiki_page, api_base=api_base, label=label)),
         ))
         logger.info(f"[Tools] 已接入 MediaWiki 站点 {name}（{api_base}）")
 
