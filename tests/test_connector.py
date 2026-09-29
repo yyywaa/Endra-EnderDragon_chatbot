@@ -640,7 +640,18 @@ class TestDragonVoice(unittest.TestCase):
     def test_one_thing_per_utterance(self):
         self.assertIn("只交付一件", self.prompt)
 
-    def test_instructs_breaking_its_own_recent_register(self):
-        """自己历史里的长篇学者腔是最强的模仿源，必须显式禁止延续它。"""
-        self.assertIn("改掉旧习惯", self.prompt)
-        self.assertIn("从这一句开始就不许再那样说", self.prompt)
+    def test_scholar_register_is_allowed_but_must_rotate(self):
+        """学者腔本身很好——要求的是轮换，不是禁用它。"""
+        self.assertIn("Registers — 你有好几副嗓子", self.prompt)
+        self.assertIn("学者腔", self.prompt)
+        self.assertIn("不能每次都是它", self.prompt)
+        self.assertIn("连用三次就算失败", self.prompt)
+        for register in ("君王腔", "野兽腔", "老贵族腔", "旧日腔", "刻薄腔"):
+            self.assertIn(register, self.prompt)
+
+    def test_length_follows_register(self):
+        self.assertIn("长度跟着嗓子走", self.prompt)
+        self.assertIn("任何腔调都不要超过三句", self.prompt)
+
+    def test_temperature_varies_too(self):
+        self.assertIn("不要永远同一种体温", self.prompt)
