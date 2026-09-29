@@ -27,7 +27,8 @@ CONNECTION_CONFIG = {
     "max_retry_delay": int(os.getenv("MAX_RETRY_DELAY", "30")),
     "heartbeat_interval": int(os.getenv("HEARTBEAT_INTERVAL", "30")),
     "message_buffer_max": int(os.getenv("MESSAGE_BUFFER_MAX", "50")),
-    "reply_cooldown": int(os.getenv("REPLY_COOLDOWN_SECONDS", "15")),
+    # 触发冷却：冷却窗口内的消息只进记忆、不触发回复（防止"每句话都答"）
+    "reply_cooldown": int(os.getenv("REPLY_COOLDOWN_SECONDS", "20")),
     "freshness_window": int(os.getenv("FRESHNESS_WINDOW_SECONDS", "60")),
 }
 
@@ -73,6 +74,10 @@ PRESENCE_CONFIG = {
     # 空房间（或名单未知且 fail_mode=quota）时，滚动窗口内允许的主动发言条数
     "quiet_daily_quota": int(os.getenv("QUIET_PROACTIVE_DAILY_QUOTA", "1")),
     "quiet_window_hours": float(os.getenv("QUIET_PROACTIVE_WINDOW_HOURS", "24")),
+    # ---- 出站节流（兜底硬护栏）：无论什么原因，都不允许它在几秒内连发 ----
+    # 场景：同一轮里模型并行调了两次 send_message、主动发言与回复撞在一起、多轮触发贴得很近。
+    "outbound_min_interval": float(os.getenv("OUTBOUND_MIN_INTERVAL_SECONDS", "8")),
+    "outbound_per_minute": int(os.getenv("OUTBOUND_PER_MINUTE", "4")),
     # MC 侧在场信号（RCON list）：网页名单为空但游戏里有人在时，不该误判成空房间。
     # 与上面那份名单是"或"的关系：任一为真即视为有人。
     "use_mc": os.getenv("PRESENCE_USE_MC", "true").lower() == "true",

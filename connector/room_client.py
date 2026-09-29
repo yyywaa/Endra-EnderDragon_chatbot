@@ -56,6 +56,7 @@ class RoomClient:
             clock=clock,
         )
         self.last_human_message_at = 0.0  # 最近一条真人消息时间（判断发言是不是"回应"）
+        self._outbound_times = []  # 最近实际发出的时间戳（出站节流用）
         self._quiet_sends = []  # 静默期已放行的主动发言时间戳
         self._was_quiet = None  # 静默状态，仅用于状态切换时打日志
 
@@ -210,11 +211,39 @@ class RoomClient:
 
     # ---- 对聊天室发言（webhook 回调入口） ----
 
+    def _outbound_throttle(self) -> Optional[str]:
+        """出站节流：返回拒绝原因，None 表示放行。
+
+        与"触发冷却"（REPLY_COOLDOWN_SECONDS，管要不要回）不同，这一层是**硬兜底**：
+        不管什么原因，都不允许它在几秒内连发两条。
+        """
+        now = self._clock()
+        window = 60.0
+        self._outbound_times = [t for t in self._outbound_times if now - t < window]
+
+        per_minute = int(self.presence_config.get("outbound_per_minute") or 0)
+        if per_minute and len(self._outbound_times) >= per_minute:
+            return f"outbound:per-minute({per_minute})"
+
+        min_interval = float(self.presence_config.get("outbound_min_interval") or 0)
+        if min_interval and self._outbound_times:
+            gap = now - self._outbound_times[-1]
+            if gap < min_interval:
+                return f"outbound:too-soon({gap:.1f}s<{min_interval:g}s)"
+
+        self._outbound_times.append(now)
+        return None
+
     async def send_reply(self, content: str):
         allowed, reason = await self._gate_outbound()
         if not allowed:
             logger.info(f"[Presence] 抑制发言（{reason}）: {content[:80]}")
             return {"delivered": False, "reason": reason}
+
+        throttle = self._outbound_throttle()
+        if throttle:
+            logger.warning(f"[Outbound] 节流丢弃发言（{throttle}）: {content[:80]}")
+            return {"delivered": False, "reason": throttle}
 
         ws = self._ws
         if ws is None:

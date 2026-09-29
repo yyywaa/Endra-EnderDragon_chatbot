@@ -190,6 +190,9 @@ def make_gated_room(count=0, clock=None, **overrides):
         "reactive_window": 180,
         "quiet_daily_quota": 1,
         "quiet_window_hours": 24,
+        # 默认关掉出站节流：本辅助函数用于测在场闸门，节流由 TestOutboundThrottle 专测
+        "outbound_min_interval": 0,
+        "outbound_per_minute": 0,
         **overrides,
     }
     room.presence = StubPresence(count)
@@ -523,3 +526,85 @@ class TestMcPresenceSignal(unittest.TestCase):
         before = len(self.server.commands)
         self.assertEqual(asyncio.run(presence.human_count()), 3)
         self.assertEqual(len(self.server.commands), before, "TTL 内不应重复查询")
+
+
+class TestOutboundThrottle(unittest.TestCase):
+    """出站硬护栏：不管什么原因，都不允许它在几秒内连发。
+
+    真实场景：玩家每 ≥冷却窗（原 15s）说一句，它就会每句都答一次，
+    实测一分钟内发出两条（间隔 26s）。冷却窗调大是"少答"，
+    这层是"绝不在几秒内连发"的兜底。
+    """
+
+    def make(self, now=None, **overrides):
+        clock = (lambda: now[0]) if now else None
+        room = make_gated_room(count=5, clock=clock, **overrides)
+        room.last_human_message_at = 0
+        return room
+
+    def test_second_send_within_min_interval_is_dropped(self):
+        now = [1000.0]
+        room = self.make(now, outbound_min_interval=8, outbound_per_minute=0)
+        first = asyncio.run(room.send_reply("第一条"))
+        self.assertTrue(first["delivered"])
+
+        now[0] += 3  # 3 秒后又要发（例如同一轮并行调了两次 send_message）
+        second = asyncio.run(room.send_reply("第二条"))
+        self.assertFalse(second["delivered"])
+        self.assertIn("too-soon", second["reason"])
+        self.assertEqual(room._ws.sent, ["第一条"], "第二条不应进入房间")
+
+    def test_send_allowed_after_interval(self):
+        now = [1000.0]
+        room = self.make(now, outbound_min_interval=8, outbound_per_minute=0)
+        asyncio.run(room.send_reply("第一条"))
+        now[0] += 9
+        self.assertTrue(asyncio.run(room.send_reply("第二条"))["delivered"])
+
+    def test_per_minute_cap(self):
+        now = [1000.0]
+        room = self.make(now, outbound_min_interval=0, outbound_per_minute=2)
+        for i in range(2):
+            now[0] += 10
+            self.assertTrue(asyncio.run(room.send_reply(f"第{i}条"))["delivered"])
+        now[0] += 10
+        capped = asyncio.run(room.send_reply("第三条"))
+        self.assertFalse(capped["delivered"])
+        self.assertIn("per-minute", capped["reason"])
+
+        now[0] += 61  # 窗口滑过后恢复
+        self.assertTrue(asyncio.run(room.send_reply("第四条"))["delivered"])
+
+    def test_reactive_sends_are_also_throttled(self):
+        """有人说话也不能成为连发的理由。"""
+        now = [1000.0]
+        room = self.make(now, outbound_min_interval=8, outbound_per_minute=0)
+        room.last_human_message_at = now[0]
+        self.assertTrue(asyncio.run(room.send_reply("回复1"))["delivered"])
+        room.last_human_message_at = now[0] + 1
+        now[0] += 1
+        self.assertFalse(asyncio.run(room.send_reply("回复2"))["delivered"])
+
+    def test_throttle_disabled_when_zero(self):
+        now = [1000.0]
+        room = self.make(now, outbound_min_interval=0, outbound_per_minute=0)
+        for i in range(5):
+            self.assertTrue(asyncio.run(room.send_reply(f"第{i}条"))["delivered"])
+
+    def test_two_turns_30s_apart_are_both_allowed_but_cooldown_can_prevent_the_trigger(self):
+        """26~30 秒两条：出站护栏不拦（那属于触发侧冷却的职责），但触发侧窗口调大后不会再触发。"""
+        now = [1000.0]
+        room = self.make(now, outbound_min_interval=8, outbound_per_minute=0)
+        asyncio.run(room.send_reply("第一条"))
+        now[0] += 26
+        self.assertTrue(asyncio.run(room.send_reply("第二条"))["delivered"])
+
+        # 触发侧：冷却窗 30s 时，30 秒内到达的玩家消息只进记忆、不触发回复
+        room2 = make_gated_room(count=5)
+        room2.reply_cooldown = 30
+        room2.last_trigger_time = time.time()
+        batch = [make_msg(sender="alice", text="你还在吗", age_seconds=1)]
+        self.assertEqual([s for _, s in room2._plan_batch(batch)], [True], "冷却窗内的消息应为 silent")
+
+        room2.last_trigger_time = time.time() - 31
+        self.assertEqual([s for _, s in room2._plan_batch(batch)], [False], "冷却窗过后应触发")

@@ -209,6 +209,12 @@ connector 因此在**出站最后一米**加了一道闸门：
   - 其余主动发言受 `QUIET_PROACTIVE_DAILY_QUOTA`（默认 1 条 / `QUIET_PROACTIVE_WINDOW_HOURS`=24h 滚动窗口）限制，超出即丢弃并打日志。
 - **名单查询失败** → 按 `PRESENCE_FAIL_MODE` 处理：`quota`（默认，等同空房间）或 `open`（放行）。
 - 入站消息照旧投递给 alive-buddy（silent 记忆不受影响），闸门只管"要不要发进房间"。
+- **两层节流，各管一件事**：
+  - `REPLY_COOLDOWN_SECONDS`（默认 30）管**要不要回**：冷却窗内到达的消息只进记忆、不触发回复。
+    设小了就会出现"玩家每说一句它答一句"——实测 15s 时一分钟内发出两条（两条触发相隔 29s）。
+  - `OUTBOUND_MIN_INTERVAL_SECONDS`（默认 8）/ `OUTBOUND_PER_MINUTE`（默认 4）是**硬兜底**：
+    不管什么原因（同一轮并行调两次 send_message、主动发言与回复相撞、多轮触发挨得很近），
+    都不允许它在几秒内连发；被拦下的发言只留在它自己的记忆里，不进房间。
 - 配额计数在内存里（重启清零）。空房间 + `restart: unless-stopped` 的稳定部署下无影响；
   若进程频繁重启，可把 `_quiet_sends` 落盘到 `secrets/` 卷。
 
