@@ -24,6 +24,9 @@ services:
   endra-connector:
     build: .
     env_file: .env
+    # MC 服务跑在宿主机（systemd mc.service），容器需要 host.docker.internal 才能连 RCON
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # coffeeroom 会话 cookie 缓存（OAT 已失效时靠有效 cookie 自续签）
       - ./secrets/cookies.json:/app/cookies.json

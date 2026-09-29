@@ -10,6 +10,9 @@ def setup_logger(name: str):
         return logger
         
     logger.setLevel(LOG_CONFIG["level"])
+    # 不向 root 传播：否则一旦某个依赖调用过 logging.basicConfig()，
+    # 每条日志会被 root 的 handler 再打印一遍（表现为日志双份）
+    logger.propagate = False
     
     formatter = logging.Formatter(LOG_CONFIG["format"])
     

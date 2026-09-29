@@ -198,6 +198,7 @@ class ToolHub:
 async def build_hub(config: Optional[dict] = None) -> ToolHub:
     """按配置装配工具集（native providers + 可选 MCP server）。"""
     from .mcp import register_mcp_tools
+    from .minecraft import register_minecraft_tools
     from .native import register_native_tools
     from .shell import register_shell_tool
 
@@ -211,6 +212,7 @@ async def build_hub(config: Optional[dict] = None) -> ToolHub:
         logger.error(f"[Tool] 审查层装配失败，将不带审查运行: {e}")
     register_native_tools(hub)
     register_shell_tool(hub)
+    register_minecraft_tools(hub)
     hub.mcp_clients = await register_mcp_tools(hub)
     if hub.tool_names():
         logger.info(f"[Tool] 已注册工具: {', '.join(hub.tool_names())}")
