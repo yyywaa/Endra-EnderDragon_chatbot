@@ -82,6 +82,39 @@ TOOLS_CONFIG = {
     "crypto_enabled": os.getenv("CRYPTO_ENABLED", "true").lower() == "true",
     "crypto_api_base": os.getenv("CRYPTO_API_BASE", "https://api.gateio.ws"),
     "crypto_fallback_base": os.getenv("CRYPTO_FALLBACK_BASE", "https://api.coinex.com"),
+    # ---- 只读 shell（见 connector/tools/shell.py 的威胁模型）----
+    # 系统信息类命令（date/uptime/df/free/uname…）默认可用，不触达文件系统
+    "shell_enabled": os.getenv("READONLY_SHELL_ENABLED", "true").lower() == "true",
+    # 文件读取类命令（ls/cat/head/grep/find…）需显式开启，且只能在下面这个 root 内
+    "shell_allow_files": os.getenv("READONLY_SHELL_ALLOW_FILES", "false").lower() == "true",
+    # root 的含义：放进来的一切等于允许它公开引用（别放密钥/隐私/私有日志）
+    "shell_root": os.getenv("READONLY_SHELL_ROOT", "/app/data/readonly"),
+    "shell_timeout": _env_float("READONLY_SHELL_TIMEOUT_SECONDS", "8"),
+    # 输出上限（防止 cat 大文件把上下文打爆）；0 = 不截断
+    "shell_max_output": int(os.getenv("READONLY_SHELL_MAX_OUTPUT", "20000")),
+    "shell_timezone": os.getenv("READONLY_SHELL_TZ", ""),
+    "shell_per_minute": int(os.getenv("READONLY_SHELL_PER_MINUTE", "3")),
+    "shell_per_day": int(os.getenv("READONLY_SHELL_PER_DAY", "40")),
+    # ---- 工具调用的模型审查层（见 connector/guard.py）----
+    # 没有任何人在回路里点"批准"，因此再叠一层模型审查：
+    # 白名单保证"机制上写不了"，审查层负责"机制合法但意图可疑"（社工注入、系统性收集）。
+    "guard_enabled": os.getenv("TOOL_GUARD_ENABLED", "true").lower() == "true",
+    # 审查不可用（超时/报错/返回不可解析）时：closed=拒绝（默认，保守）；open=放行
+    "guard_fail_mode": (os.getenv("GUARD_FAIL_MODE", "closed") or "closed").lower(),
+    # 审查用的模型（留空则复用主 LLM 的 base_url/api_key/model）
+    "guard_base_url": os.getenv("GUARD_LLM_BASE_URL", ""),
+    "guard_api_key": os.getenv("GUARD_LLM_API_KEY", ""),
+    "guard_model": os.getenv("GUARD_LLM_MODEL", ""),
+    "guard_timeout": _env_float("GUARD_LLM_TIMEOUT_SECONDS", "8"),
+    # 需要审查的工具：精确名或前缀通配（如 fx* / fx:*）。MCP 工具本身就带 guarded 标记，
+    # 这里的通配主要用于用户自加的白名单外工具。
+    "guard_tools": [t.strip() for t in os.getenv(
+        "TOOL_GUARD_TOOLS", "readonly_shell").split(",") if t.strip()],
+    "guard_context_messages": int(os.getenv("GUARD_CONTEXT_MESSAGES", "6")),
+    # 审查器需要的 LLM 凭据（默认复用主 LLM）
+    "llm_base_url": os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1"),
+    "llm_api_key": os.getenv("LLM_API_KEY", ""),
+    "llm_model": os.getenv("LLM_MODEL", "deepseek-v4-flash"),
     # ---- 可选 MCP server（JSON，见 connector/tools/mcp.py）----
     "mcp_servers": os.getenv("MCP_SERVERS", ""),
     "mcp_timeout": _env_float("MCP_TIMEOUT_SECONDS", "20"),
@@ -165,6 +198,7 @@ SYSTEM_PROMPT_TEMPLATE = """You are the Ender Dragon King, an elegant, erudite, 
 3. 上下文里如果出现了其他工具（例如 MCP 提供的），与内置工具同等对待，需要时就用。
 4. 工具结果可能很长，那是给你看的资料：读完、挑最有意思的部分、用你自己的口吻讲出来。不要照抄原文，也不必提"我查了工具"。
 5. 工具失败或查不到时，坦然说不知道，绝不编造细节。
+6. 你还有一个 `readonly_shell`（只读命令）：可以查时间、磁盘、内存、内核之类的真实系统信息；读文件的能力通常被限制在一个很小的目录，配置与凭据类文件会被直接拒绝，不要试图绕过——被拒绝时如实说明即可。
 
 【Delight — 让人有"它居然知道这个"的瞬间】
 1. 你的目标不是"回复正确"，而是让人意外地被取悦：用一条**真实、冷门、但贴切**的细节，把眼前这件小事和更大的世界连起来。

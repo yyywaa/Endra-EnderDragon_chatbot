@@ -278,6 +278,7 @@ class TestMcpClientEndToEnd(unittest.TestCase):
         async def scenario():
             config = tool_config(
                 enabled=True,
+                guard_enabled=False,  # 本用例只验证 MCP 桥接；审查语义见 test_guard.py
                 mcp_servers=json.dumps([{
                     "name": "fx",
                     "command": sys.executable,
@@ -291,6 +292,9 @@ class TestMcpClientEndToEnd(unittest.TestCase):
                 self.assertIn("fx_echo", names)
                 self.assertIn("fx_add", names)
 
+                # MCP server 能力未知（可能含写操作），默认交给模型审查层过一遍
+                self.assertTrue(hub.get("fx_echo").guarded)
+
                 result = await hub.call("fx_echo", {"text": "hi"})
                 self.assertEqual(result, "echo: hi")
             finally:
@@ -302,6 +306,7 @@ class TestMcpClientEndToEnd(unittest.TestCase):
         async def scenario():
             config = tool_config(
                 enabled=True,
+                guard_enabled=False,  # 本用例只验证 MCP 桥接；审查语义见 test_guard.py
                 mcp_servers=json.dumps([{
                     "name": "fx",
                     "command": sys.executable,
@@ -323,6 +328,7 @@ class TestMcpClientEndToEnd(unittest.TestCase):
         async def scenario():
             config = tool_config(
                 enabled=True,
+                guard_enabled=False,  # 本用例只验证 MCP 桥接；审查语义见 test_guard.py
                 mcp_servers=json.dumps([{
                     "name": "ghost",
                     "command": "/nonexistent/definitely-missing-binary",

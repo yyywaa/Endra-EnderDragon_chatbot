@@ -24,6 +24,7 @@ memory/
 dragon_memory.txt
 cookies.json
 secrets/
+readonly-data/
 
 # IDEs
 .vscode/

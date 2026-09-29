@@ -248,6 +248,8 @@ async def register_mcp_tools(hub: ToolHub) -> List[McpClient]:
                 description=f"[MCP:{spec.name}] {description}"[:1024],
                 parameters=schema if isinstance(schema, dict) else {"type": "object", "properties": {}},
                 handler=_make_handler(client, remote_name),
+                # MCP server 的能力未知（可能含写操作），默认交给审查层过一遍
+                guarded=True,
             ))
             registered += 1
         logger.info(f"[MCP] server {spec.name} 注册了 {registered} 个工具")

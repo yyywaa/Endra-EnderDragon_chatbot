@@ -7,6 +7,7 @@ from typing import Optional
 import websockets
 
 from .buddy_client import BuddyClient
+from .conversation import conversation_log
 from .config import BOT_CONFIG, CONNECTION_CONFIG, PRESENCE_CONFIG, SERVER_CONFIG
 from .logger import setup_logger
 from .presence import RoomPresence
@@ -167,6 +168,8 @@ class RoomClient:
             if self._is_human_sender(m):
                 # 有人在房间里说话 = 最强在场证据（桥接账号不进在线名单也能救回来）
                 self.last_human_message_at = self._clock()
+                # 供安全审查层判断"这次工具调用是否对得上眼前的对话"
+                conversation_log.add(m.get("sender_username"), m.get("text") or "")
             text = f"{m.get('sender_username')}: {m.get('text')}"
             try:
                 await self.buddy.deliver(text, silent, user_id=m.get("sender_username") or "coffeeroom")

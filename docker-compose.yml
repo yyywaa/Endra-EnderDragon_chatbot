@@ -27,6 +27,9 @@ services:
     volumes:
       # coffeeroom 会话 cookie 缓存（OAT 已失效时靠有效 cookie 自续签）
       - ./secrets/cookies.json:/app/cookies.json
+      # readonly_shell 的可读范围：内核级只读挂载。**放进来的一切等于允许 Endra 公开引用**，
+      # 不要放密钥、玩家隐私、私有日志。只想让它看系统信息（date/df/free）的话可以删掉这行。
+      - ./readonly-data:/app/data/readonly:ro
     depends_on:
       - alive-buddy
     restart: unless-stopped

@@ -64,9 +64,11 @@ class Tool:
     description: str
     parameters: dict
     handler: Callable[[dict], Awaitable[str]]
-    # 0 表示使用全局默认
-    per_minute: int = 0
-    per_day: int = 0
+    # None = 使用全局默认；0 = 该工具显式不限流
+    per_minute: Optional[int] = None
+    per_day: Optional[int] = None
+    # 是否交给模型审查层过一遍（白名单之外的语义防线）
+    guarded: bool = False
 
     def definition(self) -> dict:
         return {
@@ -94,6 +96,7 @@ class ToolHub:
         self._total_day: deque = deque()
         self._lock = asyncio.Lock()
         self.mcp_clients: List = []  # 由 mcp.register_mcp_tools 填充，用于关闭长连接
+        self.guard = None  # connector.guard.ToolGuard，在 build_hub 里装配
 
     # ---- 注册与导出 ----
 
@@ -129,12 +132,12 @@ class ToolHub:
         while self._total_day and now - self._total_day[0] > 86400:
             self._total_day.popleft()
 
-        per_minute = tool.per_minute or self.config["per_minute"]
-        per_day = tool.per_day or self.config["per_day"]
+        per_minute = self.config["per_minute"] if tool.per_minute is None else tool.per_minute
+        per_day = self.config["per_day"] if tool.per_day is None else tool.per_day
 
         if self.config["daily_total"] and len(self._total_day) >= self.config["daily_total"]:
             return f"今日全部工具调用已达上限（{self.config['daily_total']} 次），请不要再调用工具。"
-        if per_minute and len(usage.minute) >= per_minute:
+        if per_minute and len(usage.minute) >= per_minute:  # 0 视为不限
             return f"工具 {tool.name} 每分钟最多 {per_minute} 次，已超限，请稍后再试或换个思路。"
         if per_day and len(usage.day) >= per_day:
             return f"工具 {tool.name} 今日调用已达上限（{per_day} 次）。"
@@ -159,6 +162,13 @@ class ToolHub:
             return quota_error
 
         args = arguments or {}
+
+        # 模型审查层：白名单挡的是"机制上不可能"，这一层挡的是"机制合法但意图可疑"
+        if self.guard is not None and (tool.guarded or self.guard.should_review(name)):
+            verdict = await self.guard.review(name, args)
+            if not verdict.allowed:
+                logger.warning(f"[Guard] 拒绝 {name}: {verdict.reason}")
+                return verdict.reason
         started = self._clock()
         logger.info(f"[Tool] 调用 {name} args={str(args)[:160]}")
         try:
@@ -189,9 +199,18 @@ async def build_hub(config: Optional[dict] = None) -> ToolHub:
     """按配置装配工具集（native providers + 可选 MCP server）。"""
     from .mcp import register_mcp_tools
     from .native import register_native_tools
+    from .shell import register_shell_tool
 
     hub = ToolHub(config)
+    try:
+        from ..guard import ToolGuard
+        from ..conversation import conversation_log
+
+        hub.guard = ToolGuard(config, conversation_provider=conversation_log.recent)
+    except Exception as e:  # 审查层装配失败不应让整个工具层不可用
+        logger.error(f"[Tool] 审查层装配失败，将不带审查运行: {e}")
     register_native_tools(hub)
+    register_shell_tool(hub)
     hub.mcp_clients = await register_mcp_tools(hub)
     if hub.tool_names():
         logger.info(f"[Tool] 已注册工具: {', '.join(hub.tool_names())}")
