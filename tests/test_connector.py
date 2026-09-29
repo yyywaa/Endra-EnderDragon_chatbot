@@ -3,6 +3,7 @@ import asyncio
 import json
 import time
 import unittest
+from pathlib import Path
 
 from connector.buddy_client import BuddyClient, SessionNotFoundError
 from connector.config import PRESENCE_CONFIG
@@ -168,6 +169,18 @@ class StubPresence:
         return self.count
 
 
+class StubMcPresence:
+    """替身 MC 在场信号（RCON list）：count=None 表示未配置/查询失败。"""
+
+    def __init__(self, count=None):
+        self.count = count
+        self.queries = 0
+
+    async def human_count(self):
+        self.queries += 1
+        return self.count
+
+
 def make_gated_room(count=0, clock=None, **overrides):
     room = RoomClient(buddy=StubBuddy(), room="test-room", clock=clock)
     room.presence_enabled = True
@@ -180,6 +193,7 @@ def make_gated_room(count=0, clock=None, **overrides):
         **overrides,
     }
     room.presence = StubPresence(count)
+    room.mc_presence = StubMcPresence(overrides.pop("mc_presence_count", None))
     room._ws = FakeWS()
     return room
 
@@ -418,3 +432,94 @@ class TestSystemPromptMandates(unittest.TestCase):
     def test_keeps_persona_anchors(self):
         for anchor in ("Persona & Heritage", "Substance", "Range"):
             self.assertIn(anchor, self.prompt)
+
+
+class TestPresenceSignals(unittest.TestCase):
+    """两个在场信号取"或"：聊天室名单 ∪ 游戏内在线人数。"""
+
+    def test_mc_players_alone_count_as_present(self):
+        """玩家在 MC 里玩但没开网页：网页名单为空，也不该判成空房间。"""
+        room = make_gated_room(count=0, mc_presence_count=2)
+        result = asyncio.run(room.send_reply("主动发言"))
+        self.assertTrue(result["delivered"], result)
+        self.assertEqual(result["reason"], "present:2")
+        self.assertFalse(room._was_quiet)
+
+    def test_room_and_mc_counts_add_up(self):
+        room = make_gated_room(count=1, mc_presence_count=3)
+        result = asyncio.run(room.send_reply("主动发言"))
+        self.assertEqual(result["reason"], "present:4")
+
+    def test_both_empty_enters_quiet_mode(self):
+        room = make_gated_room(count=0, mc_presence_count=0)
+        first = asyncio.run(room.send_reply("第一条"))
+        second = asyncio.run(room.send_reply("第二条"))
+        self.assertEqual(first["reason"], "empty:quiet-quota")
+        self.assertEqual(second["reason"], "empty:quiet-room-suppressed")
+
+    def test_mc_unknown_does_not_break_room_signal(self):
+        room = make_gated_room(count=0, mc_presence_count=None)
+        self.assertEqual(asyncio.run(room.send_reply("x"))["reason"], "empty:quiet-quota")
+
+    def test_both_unknown_follows_fail_mode(self):
+        room = make_gated_room(count=None, mc_presence_count=None, fail_mode="open")
+        self.assertEqual(asyncio.run(room.send_reply("x"))["reason"], "unknown:fail-open")
+
+    def test_mc_signal_can_be_disabled(self):
+        room = make_gated_room(count=0, mc_presence_count=5, use_mc=False)
+        result = asyncio.run(room.send_reply("x"))
+        self.assertEqual(result["reason"], "empty:quiet-quota", "关掉 MC 信号后不应看它")
+        self.assertEqual(room.mc_presence.queries, 0)
+
+
+class TestMcPresenceSignal(unittest.TestCase):
+    """McPresence 走真 RCON 协议（假服务器）。"""
+
+    def setUp(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from test_minecraft import FakeRconServer
+
+        self.server = FakeRconServer(password="secret", players="alice, bob, Bot1")
+        self.addCleanup(self.server.close)
+
+    def make(self, **overrides):
+        from connector.presence import McPresence
+
+        return McPresence(
+            host="127.0.0.1",
+            port=self.server.port,
+            password="secret",
+            timeout=3,
+            cache_ttl=60,
+            ignore=overrides.pop("ignore", set()),
+            clock=overrides.pop("clock", None) or (lambda: 1000.0),
+        )
+
+    def test_counts_mc_players(self):
+        self.assertEqual(asyncio.run(self.make().human_count()), 3)
+
+    def test_ignore_list_excluded(self):
+        self.assertEqual(asyncio.run(self.make(ignore={"bot1"}).human_count()), 2)
+
+    def test_unconfigured_returns_none(self):
+        from connector.presence import McPresence
+
+        presence = McPresence(host="127.0.0.1", port=1, password="", timeout=1)
+        self.assertFalse(presence.configured)
+        self.assertIsNone(asyncio.run(presence.human_count()))
+
+    def test_rcon_failure_returns_none_and_is_cached(self):
+        from connector.presence import McPresence
+
+        presence = McPresence(host="127.0.0.1", port=1, password="secret", timeout=0.4,
+                              clock=lambda: 1000.0)
+        self.assertIsNone(asyncio.run(presence.human_count()))
+        self.assertIsNone(asyncio.run(presence.human_count()))
+
+    def test_result_is_cached_within_ttl(self):
+        presence = self.make()
+        self.assertEqual(asyncio.run(presence.human_count()), 3)
+        before = len(self.server.commands)
+        self.assertEqual(asyncio.run(presence.human_count()), 3)
+        self.assertEqual(len(self.server.commands), before, "TTL 内不应重复查询")

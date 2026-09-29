@@ -186,9 +186,16 @@ docker compose exec endra-connector python scripts/check_rcon.py
 房间没人时它会一直自说自话——看上去频道很热闹，实际上没有听众。
 connector 因此在**出站最后一米**加了一道闸门：
 
-- **在线人数**取自 coffeeroom `GET /api/online-users`（返回全部房间的在线用户 + `channel`），
-  复用已持有的 session cookie，不需要 MC 侧 RCON。只数本房间、排除 Endra 自身与
-  `PRESENCE_IGNORE_USERS` 里的桥接/bot 账号；结果缓存 `PRESENCE_CACHE_TTL_SECONDS`。
+- **两个在场信号取"或"**（任一为真即视为有人）：
+  1. **聊天室名单**：coffeeroom `GET /api/online-users`，复用已持有的 session cookie。
+     只数本房间、排除 **Endra 自身**（`BOT_USERNAME`）与 `PRESENCE_IGNORE_USERS` 里的桥接/bot 账号。
+  2. **游戏内在场**：MC 的 RCON `list`（`PRESENCE_USE_MC`，需 `MC_RCON_PASSWORD`）。
+     玩家在游戏里建房子却没开网页时信号 1 是空的——这正是它存在的理由。
+  两者结果都按 `PRESENCE_CACHE_TTL_SECONDS` 缓存。
+
+> **上线核对**：`docker compose exec endra-connector python scripts/check_presence.py`
+> 会把在线名单摊开，标出哪些账号被算作真人、哪些被排除（含 Endra 自己）。
+> 如果任何时候跑都 ≥1 人，说明有常驻 bot 在线，把它加进 `PRESENCE_IGNORE_USERS`。
 - **有人在线** → 发言全部放行。
 - **没人在线** → 只保留"回应"和极小配额：
   - 距最近一条真人消息 `PRESENCE_REACTIVE_WINDOW_SECONDS` 以内的发言算回应，永远放行（真人来了绝不会被静音）；

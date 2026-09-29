@@ -8,9 +8,9 @@ import websockets
 
 from .buddy_client import BuddyClient
 from .conversation import conversation_log
-from .config import BOT_CONFIG, CONNECTION_CONFIG, PRESENCE_CONFIG, SERVER_CONFIG
+from .config import BOT_CONFIG, CONNECTION_CONFIG, PRESENCE_CONFIG, SERVER_CONFIG, TOOLS_CONFIG
 from .logger import setup_logger
-from .presence import RoomPresence
+from .presence import McPresence, RoomPresence
 from .session_manager import session_manager
 
 logger = setup_logger("room_client")
@@ -43,6 +43,17 @@ class RoomClient:
             config=PRESENCE_CONFIG,
             bot_username=self.bot_username,
             ignore_users=self.ignore_users,
+        )
+        # MC 侧在场信号：玩家在游戏里但没开网页时，网页名单是空的，靠 RCON 兜住
+        self.mc_presence = McPresence(
+            host=PRESENCE_CONFIG.get("mc_host") or TOOLS_CONFIG["mc_rcon_host"],
+            port=PRESENCE_CONFIG.get("mc_port") or TOOLS_CONFIG["mc_rcon_port"],
+            password=PRESENCE_CONFIG.get("mc_password") or TOOLS_CONFIG["mc_rcon_password"],
+            timeout=TOOLS_CONFIG["mc_rcon_timeout"],
+            cache_ttl=PRESENCE_CONFIG["cache_ttl"],
+            ignore=set(PRESENCE_CONFIG.get("mc_ignore") or ()),
+            rcon=PRESENCE_CONFIG.get("mc_rcon"),
+            clock=clock,
         )
         self.last_human_message_at = 0.0  # 最近一条真人消息时间（判断发言是不是"回应"）
         self._quiet_sends = []  # 静默期已放行的主动发言时间戳
@@ -122,23 +133,39 @@ class RoomClient:
             logger.info(f"[Presence] {detail}，恢复主动发言")
 
     async def _gate_outbound(self) -> tuple:
-        """决定一条出站发言是否放行，返回 (allowed, reason)。"""
+        """决定一条出站发言是否放行，返回 (allowed, reason)。
+
+        两个在场信号取"或"：
+          · 聊天室名单（coffeeroom /api/online-users）：反映网页会话；
+          · MC 在线人数（RCON list）：反映游戏内实际有谁。
+        只要任一信号为真就算"有人"——玩家在游戏里但没开网页时，前者会是空的。
+        """
         if not self.presence_enabled:
             return True, "presence-disabled"
 
-        humans = await self.presence.human_count()
-        if humans is None:
+        room_humans = await self.presence.human_count()
+        mc_humans = None
+        if self.presence_config.get("use_mc", True):
+            mc_humans = await self.mc_presence.human_count()
+
+        sources = []
+        if room_humans:
+            sources.append(f"聊天室 {room_humans} 人")
+        if mc_humans:
+            sources.append(f"游戏内 {mc_humans} 人")
+        total = (room_humans or 0) + (mc_humans or 0)
+
+        if total > 0:
+            self._set_quiet(False, f"房间有人在（{'；'.join(sources)}）")
+            return True, f"present:{total}"
+
+        # 两个信号都没数到人。若都是"未知"（接口挂了/RCON 没配），交给 fail_mode 决定
+        if room_humans is None and mc_humans is None:
             if self.presence_config["fail_mode"] == "open":
                 return True, "unknown:fail-open"
             prefix = "unknown"
-            humans = 0
         else:
-            prefix = "empty" if humans == 0 else "present"
-
-        if humans > 0:
-            self._set_quiet(False, f"房间有人在（{humans}）")
-            return True, f"present:{humans}"
-
+            prefix = "empty"
         self._set_quiet(True, "房间当前无人在线" if prefix == "empty" else "在线名单未知")
 
         if self._is_reactive():

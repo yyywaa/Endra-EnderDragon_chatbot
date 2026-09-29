@@ -145,3 +145,72 @@ class RoomPresence:
             logger.debug(f"[Presence] 房间 {self.room} 在线真人: {len(names)}")
 
         return len(names)
+
+
+class McPresence:
+    """Minecraft 侧的在场信号（RCON `list` 的真实在线人数）。
+
+    为什么需要它：coffeeroom 的 /api/online-users 只反映**网页会话**。玩家在游戏里
+    建房子、挖矿但没开网页时，那份名单会是空的，闸门就会误判"房间没人"而彻底静默——
+    而他们其实看得见聊天（如果 MC 与聊天室有互通）。RCON 的在线人数才是"人在不在"的硬信号。
+
+    失败时返回 None（未知），由 PRESENCE_FAIL_MODE 决定如何处置，但**不会**让
+    coffeeroom 那份信号失效——两个信号是"或"的关系：任一为真即视为有人。
+    """
+
+    def __init__(self, host: str, port: int, password: str, timeout: float = 5.0,
+                 cache_ttl: float = 60.0, ignore: Optional[set] = None,
+                 rcon=None, clock: Optional[Callable[[], float]] = None):
+        from .mc_rcon import rcon_command
+
+        self.host = host
+        self.port = int(port)
+        self.password = password or ""
+        self.timeout = float(timeout)
+        self.cache_ttl = float(cache_ttl)
+        self.ignore = {str(i).lower() for i in (ignore or ())}
+        self._rcon = rcon or rcon_command
+        self._clock = clock or time.time
+        self._cache: Optional[int] = None
+        self._cache_at = 0.0
+        self._cache_valid = False
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.password)
+
+    def _cache_fresh(self) -> bool:
+        return self._cache_valid and (self._clock() - self._cache_at) < self.cache_ttl
+
+    def invalidate(self):
+        self._cache_valid = False
+        self._cache = None
+
+    async def human_count(self) -> Optional[int]:
+        """返回 MC 内在线玩家数（排除忽略名单）；None = 未知。"""
+        if not self.configured:
+            return None
+        if self._cache_fresh():
+            return self._cache
+
+        from .mc_rcon import RconError
+        from .tools.minecraft import parse_player_list
+
+        try:
+            output = await asyncio.to_thread(
+                self._rcon, self.host, self.port, self.password, "list", self.timeout
+            )
+            names = [n for n in parse_player_list(output) if n.lower() not in self.ignore]
+            count: Optional[int] = len(names)
+            logger.info(f"[Presence] MC 在线玩家（{count}）: {'、'.join(names) if names else '无'}")
+        except RconError as e:
+            count = None
+            logger.warning(f"[Presence] 查询 MC 在线人数失败：{e}")
+        except Exception as e:
+            count = None
+            logger.warning(f"[Presence] 查询 MC 在线人数异常：{e}")
+
+        self._cache = count
+        self._cache_at = self._clock()
+        self._cache_valid = True
+        return count

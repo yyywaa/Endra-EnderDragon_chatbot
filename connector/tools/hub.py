@@ -214,6 +214,12 @@ async def build_hub(config: Optional[dict] = None) -> ToolHub:
 
         # 注意用 hub.config 而不是形参 config：生产入口是 build_hub()，形参为 None
         hub.guard = ToolGuard(hub.config, conversation_provider=conversation_log.recent)
+        if hub.guard.enabled:
+            logger.info(
+                f"[Guard] 审查层已就绪（模型={hub.guard.model or '未配置'}，"
+                f"受审工具={hub.config.get('guard_tools') or '仅显式标记'}，"
+                f"失败策略={hub.guard.fail_mode}）"
+            )
     except Exception as e:
         # 装配失败绝不等于"放行"：受审工具一律按保守策略拒绝
         logger.critical(f"[Tool] 审查层装配失败，受审工具将被拒绝执行: {e}")

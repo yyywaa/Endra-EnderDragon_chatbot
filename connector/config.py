@@ -57,6 +57,13 @@ PRESENCE_CONFIG = {
     # 空房间（或名单未知且 fail_mode=quota）时，滚动窗口内允许的主动发言条数
     "quiet_daily_quota": int(os.getenv("QUIET_PROACTIVE_DAILY_QUOTA", "1")),
     "quiet_window_hours": float(os.getenv("QUIET_PROACTIVE_WINDOW_HOURS", "24")),
+    # MC 侧在场信号（RCON list）：网页名单为空但游戏里有人在时，不该误判成空房间。
+    # 与上面那份名单是"或"的关系：任一为真即视为有人。
+    "use_mc": os.getenv("PRESENCE_USE_MC", "true").lower() == "true",
+    "mc_ignore": _env_list("PRESENCE_MC_IGNORE_USERS"),
+    "mc_host": os.getenv("MC_RCON_HOST", "host.docker.internal"),
+    "mc_port": int(os.getenv("MC_RCON_PORT", "25575")),
+    "mc_password": os.getenv("MC_RCON_PASSWORD", ""),
 }
 
 # 工具中枢：把外部能力（萌娘百科 / Wikidata / 币价 / MCP server）暴露给 reAct 调用
