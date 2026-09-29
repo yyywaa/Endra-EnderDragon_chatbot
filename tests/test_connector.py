@@ -102,7 +102,9 @@ class TestDeliverBatch(unittest.TestCase):
         batch = [make_msg(sender="alice", text=f"hi{i}", msg_id=f"d{i}") for i in range(2)]
         asyncio.run(room._deliver_batch(batch))
         self.assertEqual([s for _, s, _ in buddy.delivered], [True, False])
-        self.assertTrue(buddy.delivered[0][0].startswith("alice: "))
+        # 第一条是语境（silent），最后一条才是要回应的
+        self.assertTrue(buddy.delivered[0][0].startswith("【仅语境】alice: "), buddy.delivered[0][0])
+        self.assertTrue(buddy.delivered[1][0].startswith("【待回应】alice: "), buddy.delivered[1][0])
         self.assertGreater(room.last_trigger_time, 0)
         self.assertIn("d0", room.processed_msg_ids)
         self.assertIn("d1", room.processed_msg_ids)
@@ -522,6 +524,44 @@ class TestMcPresenceSignal(unittest.TestCase):
         before = len(self.server.commands)
         self.assertEqual(asyncio.run(presence.human_count()), 3)
         self.assertEqual(len(self.server.commands), before, "TTL 内不应重复查询")
+
+
+class TestReplyTargetMarker(unittest.TestCase):
+    """回复目标必须显式标出，不能让模型在几条"没人回过"的话里自己挑。
+
+    实测事故：被 Cloudrayyy 的新消息触发，却先补答了 khangai 更早的提问。
+    原因是 silent 投递与触发投递在上下文里长得一模一样。
+    """
+
+    def test_only_last_message_of_batch_is_marked_as_reply_target(self):
+        buddy = StubBuddy()
+        room = RoomClient(buddy=buddy, room="test-room")
+        batch = [make_msg(sender=f"p{i}", text=f"m{i}", msg_id=f"x{i}") for i in range(3)]
+        asyncio.run(room._deliver_batch(batch))
+        markers = [text.split("】")[0] + "】" for text, _, _ in buddy.delivered]
+        self.assertEqual(markers, ["【仅语境】", "【仅语境】", "【待回应】"])
+
+    def test_cooled_down_batch_is_all_context(self):
+        """冷却期内整批都是语境：没有【待回应】，模型不该补答。"""
+        buddy = StubBuddy()
+        room = RoomClient(buddy=buddy, room="test-room")
+        room.last_trigger_time = time.time()  # 刚触发过 → 冷却中
+        asyncio.run(room._deliver_batch([make_msg(sender="alice", text="你还在吗")]))
+        self.assertTrue(buddy.delivered[0][0].startswith("【仅语境】"))
+
+    def test_stale_message_is_context_not_target(self):
+        buddy = StubBuddy()
+        room = RoomClient(buddy=buddy, room="test-room")
+        asyncio.run(room._deliver_batch([make_msg(sender="alice", text="旧话", age_seconds=3600)]))
+        self.assertTrue(buddy.delivered[0][0].startswith("【仅语境】"))
+
+    def test_persona_explains_the_markers(self):
+        from connector.config import SYSTEM_PROMPT_TEMPLATE as prompt
+        self.assertIn("【待回应】", prompt)
+        self.assertIn("【仅语境】", prompt)
+        self.assertIn("即使它们还没被任何人回过", prompt)
+        self.assertIn("回**最下面那条**", prompt)
+        self.assertIn("主动开口时", prompt)
 
 
 class TestOutboundThrottle(unittest.TestCase):

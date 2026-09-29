@@ -198,7 +198,12 @@ class RoomClient:
                 self.last_human_message_at = self._clock()
                 # 供安全审查层判断"这次工具调用是否对得上眼前的对话"
                 conversation_log.add(m.get("sender_username"), m.get("text") or "")
-            text = f"{m.get('sender_username')}: {m.get('text')}"
+            # 显式标出"这条要不要回"：silent 投递（冷却期/批次内非最后一条）对模型来说
+            # 本来是看不出区别的，于是它会在几条"没人回过"的话里自己挑一条答——
+            # 实测就出现过"被 Cloudrayyy 触发，却先补答 khangai 更早那条"。
+            # 标记进 L1 后，"这次该回哪条"就不再需要模型自己猜。
+            marker = "【仅语境】" if silent else "【待回应】"
+            text = f"{marker}{m.get('sender_username')}: {m.get('text')}"
             try:
                 await self.buddy.deliver(text, silent, user_id=m.get("sender_username") or "coffeeroom")
             except Exception as e:
