@@ -608,3 +608,39 @@ class TestOutboundThrottle(unittest.TestCase):
 
         room2.last_trigger_time = time.time() - 31
         self.assertEqual([s for _, s in room2._plan_batch(batch)], [False], "冷却窗过后应触发")
+
+
+class TestDragonVoice(unittest.TestCase):
+    """人设必须把"龙"的坐标写死，防止再退化成学者/讲解员腔。"""
+
+    def setUp(self):
+        from connector.config import SYSTEM_PROMPT_TEMPLATE
+        self.prompt = SYSTEM_PROMPT_TEMPLATE
+
+    def test_voice_section_exists_with_three_anchors(self):
+        self.assertIn("Voice — 要像龙，不要像学者", self.prompt)
+        for anchor in ("尺度是你的", "身体是你的", "主权是你的"):
+            self.assertIn(anchor, self.prompt)
+
+    def test_lecturer_register_is_banned(self):
+        self.assertIn("反面清单", self.prompt)
+        for banned in ("值得一提", "事实上", "有趣的是", "讲解员"):
+            self.assertIn(banned, self.prompt)
+        self.assertIn("不要总结句", self.prompt)
+
+    def test_has_dragon_vs_scholar_contrast_examples(self):
+        self.assertIn("同一件事，两种说法", self.prompt)
+        self.assertIn("学者腔：", self.prompt)
+        self.assertIn("孤独是你们发明的东西", self.prompt, "应给出龙的示范句")
+
+    def test_brevity_is_explicit(self):
+        self.assertIn("最多三句", self.prompt)
+        self.assertIn("龙不做演讲", self.prompt)
+
+    def test_one_thing_per_utterance(self):
+        self.assertIn("只交付一件", self.prompt)
+
+    def test_instructs_breaking_its_own_recent_register(self):
+        """自己历史里的长篇学者腔是最强的模仿源，必须显式禁止延续它。"""
+        self.assertIn("改掉旧习惯", self.prompt)
+        self.assertIn("从这一句开始就不许再那样说", self.prompt)
