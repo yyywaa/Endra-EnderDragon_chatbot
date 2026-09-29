@@ -392,3 +392,29 @@ class TestQuietRoomDailyBehaviour(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSystemPromptMandates(unittest.TestCase):
+    """人设提示词里的几条硬要求不能在后人改动中被悄悄删掉。"""
+
+    def setUp(self):
+        from connector.config import SYSTEM_PROMPT_TEMPLATE
+        self.prompt = SYSTEM_PROMPT_TEMPLATE
+
+    def test_forbids_repetition(self):
+        self.assertIn("Anti-Repetition", self.prompt)
+        self.assertIn("同一个意思绝不换措辞讲第二遍", self.prompt)
+
+    def test_requires_proactive_tool_use(self):
+        self.assertIn("主动查，别靠猜", self.prompt)
+        self.assertIn("积极使用", self.prompt)
+        self.assertIn("先查再说", self.prompt)
+        self.assertIn("MCP", self.prompt)
+
+    def test_asks_for_delight(self):
+        self.assertIn("Delight", self.prompt)
+        self.assertIn("它居然知道这个", self.prompt)
+
+    def test_keeps_persona_anchors(self):
+        for anchor in ("Persona & Heritage", "Substance", "Range"):
+            self.assertIn(anchor, self.prompt)
