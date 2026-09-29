@@ -2,3 +2,5 @@ websockets
 requests
 python-dotenv
 aiohttp
+# 可选：MCP 支持（MCP_SERVERS 用到时才需要，未装则自动跳过并打日志）
+mcp>=2.2.0

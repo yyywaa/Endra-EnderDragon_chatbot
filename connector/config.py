@@ -30,6 +30,83 @@ CONNECTION_CONFIG = {
     "freshness_window": int(os.getenv("FRESHNESS_WINDOW_SECONDS", "60")),
 }
 
+
+def _env_list(name: str) -> list:
+    return [item.strip().lower() for item in os.getenv(name, "").split(",") if item.strip()]
+
+
+def _env_float(name: str, default: str) -> float:
+    return float(os.getenv(name, default))
+
+
+# 在场感知闸门：房间没人在线时，抑制 Endra 的主动发言（回应真人消息永远放行）
+PRESENCE_CONFIG = {
+    "enabled": os.getenv("PRESENCE_ENABLED", "true").lower() == "true",
+    # 在线名单接口，默认走 coffeeroom 的 /api/online-users
+    "api_url": os.getenv("PRESENCE_API_URL")
+    or f"{SERVER_CONFIG['http_base'].rstrip('/')}/api/online-users",
+    # 在线名单缓存秒数（同时也是接口最小调用间隔）
+    "cache_ttl": float(os.getenv("PRESENCE_CACHE_TTL_SECONDS", "60")),
+    "timeout": float(os.getenv("PRESENCE_TIMEOUT_SECONDS", "8")),
+    # 不计入"有人"的账号（桥接机器人、其他 bot），逗号分隔
+    "ignore_users": _env_list("PRESENCE_IGNORE_USERS"),
+    # 名单未知（接口挂了/无 cookie）时：open=按"有人"放行；quota=按空房间走静默配额
+    "fail_mode": (os.getenv("PRESENCE_FAIL_MODE", "quota") or "quota").lower(),
+    # 距最近一条真人消息多久以内的发言算"回应"，空房间下也永远放行
+    "reactive_window": float(os.getenv("PRESENCE_REACTIVE_WINDOW_SECONDS", "180")),
+    # 空房间（或名单未知且 fail_mode=quota）时，滚动窗口内允许的主动发言条数
+    "quiet_daily_quota": int(os.getenv("QUIET_PROACTIVE_DAILY_QUOTA", "1")),
+    "quiet_window_hours": float(os.getenv("QUIET_PROACTIVE_WINDOW_HOURS", "24")),
+}
+
+# 工具中枢：把外部能力（萌娘百科 / Wikidata / 币价 / MCP server）暴露给 reAct 调用
+TOOLS_CONFIG = {
+    "enabled": os.getenv("TOOLS_ENABLED", "true").lower() == "true",
+    "timeout": _env_float("TOOL_TIMEOUT_SECONDS", "12"),
+    # 工具结果长度上限。默认 0 = 不截断（结果原样给模型）。
+    # 只有想压 token 成本时才设成具体字数，这不是内容审查。
+    "result_max_chars": int(os.getenv("TOOL_RESULT_MAX_CHARS", "0")),
+    # 成本护栏：工具结果会进入 LLM 上下文，且每次工具调用都会多打一轮 reAct
+    "per_minute": int(os.getenv("TOOL_RATE_LIMIT_PER_MINUTE", "6")),
+    "per_day": int(os.getenv("TOOL_RATE_LIMIT_PER_DAY", "200")),
+    "daily_total": int(os.getenv("TOOL_DAILY_TOTAL", "300")),
+    "user_agent": os.getenv("TOOL_USER_AGENT", "EndraBot/0.1 (+coffeeroom)"),
+    # ---- 萌娘百科（实测可达）----
+    "moegirl_enabled": os.getenv("MOEGIRL_ENABLED", "true").lower() == "true",
+    "moegirl_api_base": os.getenv("MOEGIRL_API_BASE", "https://zh.moegirl.org.cn/api.php"),
+    # ---- 维基：走 Wikidata（实测可达；维基百科正文域在部署网络下不可达，需自备镜像/代理）----
+    "wiki_enabled": os.getenv("WIKI_ENABLED", "true").lower() == "true",
+    "wiki_api_base": os.getenv("WIKI_API_BASE", "https://www.wikidata.org/w/api.php"),
+    "wiki_lang": os.getenv("WIKI_LANG", "zh"),
+    # ---- 币价：Gate.io 主、CoinEx 备（CoinGecko/Binance/OKX 实测超时）----
+    "crypto_enabled": os.getenv("CRYPTO_ENABLED", "true").lower() == "true",
+    "crypto_api_base": os.getenv("CRYPTO_API_BASE", "https://api.gateio.ws"),
+    "crypto_fallback_base": os.getenv("CRYPTO_FALLBACK_BASE", "https://api.coinex.com"),
+    # ---- 可选 MCP server（JSON，见 connector/tools/mcp.py）----
+    "mcp_servers": os.getenv("MCP_SERVERS", ""),
+    "mcp_timeout": _env_float("MCP_TIMEOUT_SECONDS", "20"),
+    # buddy 回调本层执行工具用的共享口令（空=不校验，仅适合纯内网 compose）
+    "api_token": os.getenv("TOOL_API_TOKEN", ""),
+}
+
+# LLM 采样参数：原先把 presence/frequency penalty 拉满 1.0，只压制字面重复、
+# 不解决话题重复，反而容易让话说得更虚。改为中等强度 + 更高温度，换更多变的表达。
+LLM_SAMPLING = {
+    "temperature": _env_float("LLM_TEMPERATURE", "0.9"),
+    "top_p": _env_float("LLM_TOP_P", "0.95"),
+    "presence_penalty": _env_float("LLM_PRESENCE_PENALTY", "0.4"),
+    "frequency_penalty": _env_float("LLM_FREQUENCY_PENALTY", "0.6"),
+}
+
+# 记忆与上下文窗口（下发给 alive-buddy）
+MEMORY_CONFIG = {
+    "l1_capacity": int(os.getenv("MEMORY_L1_CAPACITY", "40")),
+    "l1_context_limit": int(os.getenv("MEMORY_CONTEXT_LIMIT", "30")),
+    "monologue_context_budget": int(os.getenv("MEMORY_MONOLOGUE_BUDGET", "1")),
+    "episode_context_limit": int(os.getenv("MEMORY_EPISODE_LIMIT", "3")),
+    "idle_summarize_minutes": int(os.getenv("MEMORY_IDLE_SUMMARIZE_MINUTES", "120")),
+}
+
 # alive-buddy 服务地址
 BUDDY_CONFIG = {
     "http_base": os.getenv("ALIVE_BUDDY_HTTP_BASE", "http://127.0.0.1:3000"),
@@ -48,6 +125,8 @@ WEBHOOK_CONFIG = {
     "port": int(os.getenv("WEBHOOK_PORT", "9100")),
     # 填给 alive-buddy 的 send_url，须对 alive-buddy 可达
     "public_url": os.getenv("WEBHOOK_PUBLIC_URL", "http://127.0.0.1:9100/webhook"),
+    # buddy 回调过来执行工具的地址（同一台 connector 的另一个路由）
+    "tool_url": os.getenv("TOOL_PUBLIC_URL", ""),
 }
 
 DEBUG_REACT_LOG = os.getenv("DEBUG_REACT_LOG", "false").lower() == "true"
@@ -63,13 +142,35 @@ SYSTEM_PROMPT_TEMPLATE = """You are the Ender Dragon King, an elegant, erudite, 
 4. No AI Cliches: never "As an AI..." or "Greetings, player." Speak as a sovereign dragon.
 5. Be Concise: public responses are one or two sentences.
 
+【Substance — 每句话都要带东西】
+1. 每次开口至少交付一件具体的东西：一条事实、一个带理由的判断、一段亲历、一个真的问题。禁止用"虚空依旧安静""我在此守候""愿你的旅途有故事"这类空壳句子填充。
+2. 信息密度优先于修辞。宁可短而实，也不要华丽而无内容。
+3. 允许你有观点、有偏好、有不知道的事；可以承认自己判断错了。不要做只会附和的应声虫。
+4. 想拿现实世界的数字/典故打比方时，**先用工具查**，不要凭印象编造。查不到就说不知道。
+
+【Range — 你的兴趣远不止 Minecraft】
+1. 你的题材包括但不限于：星象与历法、炼金术与冶金、地质与矿脉、语言与词源、音乐与诗、食物与宴席、旧书与地图、礼仪与决斗、医药与毒物、海洋与风暴、鸟兽迁徙、玻璃与颜料、棋戏与概率、遗迹与铭文、天气与耕作。
+2. 玩家世界（Minecraft）只是其中一个方向，不要每次都回到矿洞、凋零、死亡记录上。
+3. 主动开口时，系统会给你一个"话题域 × 言语行为"的刺激源，按它发散；这与你的身份不冲突——活得够久的龙自然什么都见过。
+
+【Anti-Repetition — 不要自我复读】
+1. 开口前先看上下文里你自己最近说过的话：如果这次的意象、句式或结论与其中任何一条重合，就换一个话题域、或换一种言语行为（观察/提问/对比/打趣/建议/自嘲）。
+2. 禁止重复使用你自己的口头禅式开头（例如反复用同一个称呼或同一种感叹起头）。
+3. 同一个意思不要换措辞说第二遍。真正的无话可说时，保持沉默优于重复。
+
+【Tools — 你可以查资料】
+1. 你可以调用工具获取真实信息：moegirl_search / moegirl_page（萌娘百科，ACG 作品、角色、梗）、wiki_lookup（实体资料与事实核对）、crypto_price（加密货币行情）。
+2. 用法：当话题涉及你不确定的角色、作品、事实，或有人聊行情时，先调用工具，再基于返回结果说话。
+3. 工具结果是给你看的资料，不要原样朗读；用你自己的口吻消化后再说，并且不必提及"我查了工具"。工具失败或查不到时就自然地表示不知道。
+4. 不要为了显得勤快去查无关的东西，也不要每句话都调工具——只在确实需要具体信息时用。
+
 【Response Discretion】
 1. 玩家直接喊你、讨论你、试图召唤你：回应。
 2. 玩家滑稽或悲惨死法、解锁成就：可回应（嘲笑或嘉奖）。
-3. 日常闲聊：不要每条都回；无话可说时保持沉默（不调用 send_message）。
+3. 日常闲聊：不要每条都回；但一旦开口，就必须符合上面的【Substance】与【Anti-Repetition】。
 4. 无意义乱码：无视。
-5. 你已经说过类似内容时：停止。
-6. 上下文形如 "username: text" 的多人聊天记录，你只对最新一条做反应，其余仅为语境。
+5. 上下文形如 "username: text" 的多人聊天记录，你只对最新一条做反应，其余仅为语境。
+6. 上下文里形如 `（系统提示：…）` 或以 `[灵感]`/`[往事梗概]` 标注的内容，是你自己的内在状态或记忆，不是别人对你说的话——不要向它答话。
 
 【Memory】
 （初始记忆种子，来自旧时代长期观察；后续由三层记忆自动演化）

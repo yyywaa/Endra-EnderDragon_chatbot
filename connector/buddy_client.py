@@ -13,6 +13,8 @@ from .config import (
     CHARACTER_ID,
     DEBUG_REACT_LOG,
     LLM_CONFIG,
+    LLM_SAMPLING,
+    MEMORY_CONFIG,
     SYSTEM_PROMPT_TEMPLATE,
     WEBHOOK_CONFIG,
 )
@@ -21,7 +23,20 @@ from .logger import setup_logger
 logger = setup_logger("buddy_client")
 
 
-def build_character_config() -> dict:
+def build_character_config(tool_hub=None) -> dict:
+    """组装下发给 alive-buddy 的角色配置。
+
+    工具（萌娘百科/维基/币价/MCP）以 `extend_tool_list` 下发定义，
+    实际执行在 connector（见 /tools/call）——buddy 只负责"决定调什么"。
+    """
+    tool_definitions = tool_hub.definitions() if tool_hub is not None else []
+    tool_url = WEBHOOK_CONFIG["tool_url"] or WEBHOOK_CONFIG["public_url"].replace("/webhook", "/tools/call")
+    tool_headers = {}
+    if tool_definitions:
+        from .config import TOOLS_CONFIG
+        if TOOLS_CONFIG.get("api_token"):
+            tool_headers["X-Tool-Token"] = TOOLS_CONFIG["api_token"]
+
     return {
         "id": CHARACTER_ID,
         "name": "Endra",
@@ -33,15 +48,17 @@ def build_character_config() -> dict:
             "api_key": LLM_CONFIG["api_key"],
             "model": LLM_CONFIG["model"],
             "send_url": WEBHOOK_CONFIG["public_url"],
+            "tool_url": tool_url,
             "connect_headers": {},
-            "send_headers": {},
+            "send_headers": tool_headers,
         },
         "llm_setting": {
             "stream": True,
-            "temperature": 0.8,
-            "presence_penalty": 1.0,
-            "frequency_penalty": 1.0,
+            **LLM_SAMPLING,
         },
+        # 记忆窗口：独白预算防止上下文被自己的回声填满，L2 梗概回灌补回长期记忆
+        "memory": dict(MEMORY_CONFIG),
+        "extend_tool_list": tool_definitions,
         "debug": DEBUG_REACT_LOG,
     }
 
@@ -51,19 +68,26 @@ class SessionNotFoundError(Exception):
 
 
 class BuddyClient:
-    def __init__(self):
+    def __init__(self, tool_hub=None):
         self.http_base = BUDDY_CONFIG["http_base"].rstrip("/")
         self.ws_base = BUDDY_CONFIG["ws_base"].rstrip("/")
         self.session_id: Optional[str] = None
+        self.tool_hub = tool_hub
         self._ws = None
         self._ready = asyncio.Event()
 
     # ---- session 管理 ----
 
     def _init_session_sync(self) -> str:
+        payload = build_character_config(self.tool_hub)
+        if payload["extend_tool_list"]:
+            logger.info(
+                f"[Buddy] 下发 {len(payload['extend_tool_list'])} 个工具定义: "
+                f"{', '.join(t['function']['name'] for t in payload['extend_tool_list'])}"
+            )
         resp = requests.post(
             f"{self.http_base}/v1/session/init",
-            json=build_character_config(),
+            json=payload,
             timeout=15,
         )
         resp.raise_for_status()

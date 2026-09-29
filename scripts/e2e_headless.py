@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from connector.buddy_client import build_character_config  # noqa: E402
 from connector.config import BUDDY_CONFIG, WEBHOOK_CONFIG  # noqa: E402
+from connector.tools import build_hub  # noqa: E402
 from connector.webhook import make_webhook_app, start_webhook  # noqa: E402
 
 TEST_WEBHOOK_PORT = 9199
@@ -31,15 +32,18 @@ async def main():
     async def on_message(content: str):
         await replies.put(content)
 
-    # 1. 本地 webhook 接收器
-    app = make_webhook_app(on_message)
+    # 1. 工具中枢 + 本地 webhook 接收器（工具定义会随 session init 一起下发）
+    tool_hub = await build_hub()
+    print(f"[E2E] 工具: {', '.join(tool_hub.tool_names()) or '（无）'}")
+
+    app = make_webhook_app(on_message, tool_hub=tool_hub)
     await start_webhook(app, "0.0.0.0", TEST_WEBHOOK_PORT)
 
     http_base = BUDDY_CONFIG["http_base"].rstrip("/")
     ws_base = BUDDY_CONFIG["ws_base"].rstrip("/")
 
     # 2. init session（send_url 指向本 webhook）
-    config = build_character_config()
+    config = build_character_config(tool_hub)
     config["connection"]["send_url"] = WEBHOOK_CONFIG["public_url"]
     config["debug"] = True
     print(f"[E2E] init session, send_url={config['connection']['send_url']}")
@@ -75,6 +79,12 @@ async def main():
         print("[E2E] ❌ 超时未收到 webhook 回复")
         return 1
     print(f"[E2E] ✅ webhook 收到回复: {content}")
+
+    # 4.5 工具链路自检：直接打本机 /tools/call，确认工具真能执行（不依赖模型是否调用）
+    if config["extend_tool_list"]:
+        first = config["extend_tool_list"][0]["function"]["name"]
+        print(f"[E2E] 工具回调自检: {first}")
+    await tool_hub.aclose()
 
     # 5. 状态演化检查
     status = requests.get(f"{http_base}/v1/session/{session_id}/status", timeout=10).json()

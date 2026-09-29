@@ -7,20 +7,22 @@ from typing import Optional
 import websockets
 
 from .buddy_client import BuddyClient
-from .config import BOT_CONFIG, CONNECTION_CONFIG, SERVER_CONFIG
+from .config import BOT_CONFIG, CONNECTION_CONFIG, PRESENCE_CONFIG, SERVER_CONFIG
 from .logger import setup_logger
+from .presence import RoomPresence
 from .session_manager import session_manager
 
 logger = setup_logger("room_client")
 
 
 class RoomClient:
-    def __init__(self, buddy: BuddyClient, room: Optional[str] = None):
+    def __init__(self, buddy: BuddyClient, room: Optional[str] = None, clock=None):
         self.buddy = buddy
         self.room = room or BOT_CONFIG["room"]
         self.bot_username = BOT_CONFIG.get("username") or "EnderDragon"
         self.processed_msg_ids = set()
         self.last_trigger_time = 0.0  # 上一次投递非 silent 消息的时间（成本护栏）
+        self._clock = clock or time.time
 
         self.ws_base = SERVER_CONFIG["ws_base"]
         self.heartbeat_interval = CONNECTION_CONFIG["heartbeat_interval"]
@@ -29,6 +31,21 @@ class RoomClient:
         self.freshness_window = CONNECTION_CONFIG["freshness_window"]
         self.base_delay = CONNECTION_CONFIG["initial_retry_delay"]
         self.max_delay = CONNECTION_CONFIG["max_retry_delay"]
+
+        # ---- 在场感知：房间没人时别对着空频道自言自语 ----
+        self.presence_config = PRESENCE_CONFIG
+        self.presence_enabled = PRESENCE_CONFIG["enabled"]
+        self.ignore_users = {u.lower() for u in (PRESENCE_CONFIG.get("ignore_users") or ())}
+        self.presence = RoomPresence(
+            room=self.room,
+            cookie_provider=lambda: session_manager.get_session(force_refresh=False),
+            config=PRESENCE_CONFIG,
+            bot_username=self.bot_username,
+            ignore_users=self.ignore_users,
+        )
+        self.last_human_message_at = 0.0  # 最近一条真人消息时间（判断发言是不是"回应"）
+        self._quiet_sends = []  # 静默期已放行的主动发言时间戳
+        self._was_quiet = None  # 静默状态，仅用于状态切换时打日志
 
         self._ws = None  # 当前房间 ws 连接，供 webhook 回头发言用
 
@@ -65,6 +82,70 @@ class RoomClient:
     def _is_on_cooldown(self) -> bool:
         return (time.time() - self.last_trigger_time) < self.reply_cooldown
 
+    # ---- 在场感知闸门（只拦出站发言，不影响记忆投递） ----
+
+    def _is_human_sender(self, msg: dict) -> bool:
+        """真人 = 不是 Endra 自己，也不在忽略名单里的发送者。"""
+        name = str(msg.get("sender_username") or "").lower()
+        if not name:
+            return False
+        return name != self.bot_username.lower() and name not in self.ignore_users
+
+    def _is_reactive(self) -> bool:
+        """距最近一条真人消息足够近的发言视为"回应"，空房间下也放行。"""
+        if self.last_human_message_at <= 0:
+            return False
+        window = self.presence_config["reactive_window"]
+        return (self._clock() - self.last_human_message_at) <= window
+
+    def _take_quiet_quota(self) -> bool:
+        """静默期配额：滚动窗口内最多放行 N 条主动发言。"""
+        quota = self.presence_config["quiet_daily_quota"]
+        if quota <= 0:
+            return False
+        now = self._clock()
+        window = self.presence_config["quiet_window_hours"] * 3600
+        self._quiet_sends = [t for t in self._quiet_sends if now - t < window]
+        if len(self._quiet_sends) >= quota:
+            return False
+        self._quiet_sends.append(now)
+        return True
+
+    def _set_quiet(self, quiet: bool, detail: str):
+        if self._was_quiet == quiet:
+            return
+        self._was_quiet = quiet
+        if quiet:
+            logger.info(f"[Presence] {detail}，主动发言进入静默配额模式")
+        else:
+            logger.info(f"[Presence] {detail}，恢复主动发言")
+
+    async def _gate_outbound(self) -> tuple:
+        """决定一条出站发言是否放行，返回 (allowed, reason)。"""
+        if not self.presence_enabled:
+            return True, "presence-disabled"
+
+        humans = await self.presence.human_count()
+        if humans is None:
+            if self.presence_config["fail_mode"] == "open":
+                return True, "unknown:fail-open"
+            prefix = "unknown"
+            humans = 0
+        else:
+            prefix = "empty" if humans == 0 else "present"
+
+        if humans > 0:
+            self._set_quiet(False, f"房间有人在（{humans}）")
+            return True, f"present:{humans}"
+
+        self._set_quiet(True, "房间当前无人在线" if prefix == "empty" else "在线名单未知")
+
+        if self._is_reactive():
+            return True, f"{prefix}:reactive"
+        if self._take_quiet_quota():
+            return True, f"{prefix}:quiet-quota"
+        return False, f"{prefix}:quiet-room-suppressed"
+
     # ---- 批次处理：除最后一条外全部 silent，最后一条受冷却控制 ----
 
     def _plan_batch(self, batch: list) -> list:
@@ -83,6 +164,9 @@ class RoomClient:
 
     async def _deliver_batch(self, batch: list):
         for m, silent in self._plan_batch(batch):
+            if self._is_human_sender(m):
+                # 有人在房间里说话 = 最强在场证据（桥接账号不进在线名单也能救回来）
+                self.last_human_message_at = self._clock()
             text = f"{m.get('sender_username')}: {m.get('text')}"
             try:
                 await self.buddy.deliver(text, silent, user_id=m.get("sender_username") or "coffeeroom")
@@ -97,15 +181,22 @@ class RoomClient:
     # ---- 对聊天室发言（webhook 回调入口） ----
 
     async def send_reply(self, content: str):
+        allowed, reason = await self._gate_outbound()
+        if not allowed:
+            logger.info(f"[Presence] 抑制发言（{reason}）: {content[:80]}")
+            return {"delivered": False, "reason": reason}
+
         ws = self._ws
         if ws is None:
             logger.warning(f"[Bot] 房间未连接，丢弃发言: {content[:80]}")
-            return
+            return {"delivered": False, "reason": "room-disconnected"}
         try:
             await ws.send(content)
-            logger.info(f"[Bot] 发送: {content}")
+            logger.info(f"[Bot] 发送（{reason}）: {content}")
+            return {"delivered": True, "reason": reason}
         except Exception as e:
             logger.error(f"[Bot] 发送失败: {e}")
+            return {"delivered": False, "reason": f"send-error: {e}"}
 
     # ---- 主循环 ----
 

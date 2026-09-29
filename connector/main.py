@@ -1,4 +1,4 @@
-"""入口：编排启动顺序（webhook → buddy init/chat ws → 房间 ws）。"""
+"""入口：编排启动顺序（工具中枢 → webhook → buddy init/chat ws → 房间 ws）。"""
 import asyncio
 import sys
 
@@ -6,6 +6,7 @@ from .buddy_client import BuddyClient
 from .config import WEBHOOK_CONFIG
 from .logger import setup_logger
 from .room_client import RoomClient
+from .tools import build_hub
 from .webhook import make_webhook_app, start_webhook
 
 logger = setup_logger("main")
@@ -14,24 +15,28 @@ logger = setup_logger("main")
 async def main():
     logger.info("Starting Endra connector...")
 
-    buddy = BuddyClient()
+    # 1. 先装配工具中枢（含 MCP 连接），工具定义要在 buddy init 时一起下发
+    tool_hub = await build_hub()
+
+    buddy = BuddyClient(tool_hub=tool_hub)
     room = RoomClient(buddy)
 
-    # 1. 起 webhook 监听（alive-buddy 的 send_url 指向这里）
-    app = make_webhook_app(room.send_reply)
+    # 2. 起 webhook 监听（alive-buddy 的 send_url 指向 /webhook，工具回调走 /tools/call）
+    app = make_webhook_app(room.send_reply, tool_hub=tool_hub)
     await start_webhook(app, WEBHOOK_CONFIG["host"], WEBHOOK_CONFIG["port"])
 
-    # 2. buddy 会话 + chat ws（后台自维护断线重连/重 init）
+    # 3. buddy 会话 + chat ws（后台自维护断线重连/重 init）
     buddy_task = asyncio.create_task(buddy.run())
 
-    # 3. 等 buddy 就绪后再连聊天室，避免历史灌入时无处投递
+    # 4. 等 buddy 就绪后再连聊天室，避免历史灌入时无处投递
     await buddy.wait_ready()
 
-    # 4. 房间连接主循环（前台，Ctrl+C 退出）
+    # 5. 房间连接主循环（前台，Ctrl+C 退出）
     try:
         await room.run()
     finally:
         buddy_task.cancel()
+        await tool_hub.aclose()
 
 
 def entrypoint():
