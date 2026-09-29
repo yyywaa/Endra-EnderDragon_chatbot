@@ -640,18 +640,22 @@ class TestDragonVoice(unittest.TestCase):
     def test_one_thing_per_utterance(self):
         self.assertIn("只交付一件", self.prompt)
 
-    def test_scholar_register_is_allowed_but_must_rotate(self):
-        """学者腔本身很好——要求的是轮换，不是禁用它。"""
-        self.assertIn("Registers — 你有好几副嗓子", self.prompt)
+    def test_voice_is_chosen_by_occasion_not_by_rotation(self):
+        """腔调看场合合身，不是轮值的班表（曾错误地做成机械轮换）。"""
+        self.assertIn("腔调跟着场合走", self.prompt)
+        self.assertIn("不是轮流用", self.prompt)
+        self.assertIn("不要为了", self.prompt)
+        self.assertIn("不是轮值的班表", self.prompt)
+
+    def test_humanities_topics_invite_the_scholar_voice_and_lookup(self):
+        self.assertIn("谈人类的知识、历史、技艺、传闻", self.prompt)
         self.assertIn("学者腔", self.prompt)
-        self.assertIn("不能每次都是它", self.prompt)
-        self.assertIn("连用三次就算失败", self.prompt)
-        for register in ("君王腔", "野兽腔", "老贵族腔", "旧日腔", "刻薄腔"):
-            self.assertIn(register, self.prompt)
+        self.assertIn("去查", self.prompt)
 
-    def test_length_follows_register(self):
-        self.assertIn("长度跟着嗓子走", self.prompt)
-        self.assertIn("任何腔调都不要超过三句", self.prompt)
+    def test_dragon_topics_speak_as_the_dragon_itself(self):
+        self.assertIn("你就是末影龙", self.prompt)
+        self.assertIn("绝不要用人类学者的口吻讲你自己", self.prompt)
+        self.assertIn("mcwiki", self.prompt, "谈末地记载时可以查 Minecraft Wiki")
 
-    def test_temperature_varies_too(self):
-        self.assertIn("不要永远同一种体温", self.prompt)
+    def test_brevity_applies_to_every_register(self):
+        self.assertIn("不超过三句", self.prompt)
