@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -39,6 +40,21 @@ def _env_float(name: str, default: str) -> float:
     return float(os.getenv(name, default))
 
 
+def _env_json(name: str):
+    """解析 JSON 数组型 env；非法就当作空并打日志（不让坏配置拖垮启动）。"""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"[Config] {name} 不是合法 JSON，已忽略：{e}")
+        return []
+    if isinstance(data, dict):
+        data = [data]
+    return data if isinstance(data, list) else []
+
+
 # 在场感知闸门：房间没人在线时，抑制 Endra 的主动发言（回应真人消息永远放行）
 PRESENCE_CONFIG = {
     "enabled": os.getenv("PRESENCE_ENABLED", "true").lower() == "true",
@@ -77,6 +93,10 @@ TOOLS_CONFIG = {
     "per_minute": int(os.getenv("TOOL_RATE_LIMIT_PER_MINUTE", "6")),
     "per_day": int(os.getenv("TOOL_RATE_LIMIT_PER_DAY", "200")),
     "daily_total": int(os.getenv("TOOL_DAILY_TOTAL", "300")),
+    # 熔断：某工具连续失败达阈值就停用一段时间，避免对着不通的数据源反复白等
+    # （每次超时都白烧一个 timeout + 一轮 LLM）；0 = 关闭熔断
+    "circuit_threshold": int(os.getenv("TOOL_CIRCUIT_THRESHOLD", "3")),
+    "circuit_cooldown": _env_float("TOOL_CIRCUIT_COOLDOWN_SECONDS", "600"),
     "user_agent": os.getenv("TOOL_USER_AGENT", "EndraBot/0.1 (+coffeeroom)"),
     # ---- 萌娘百科（实测可达）----
     "moegirl_enabled": os.getenv("MOEGIRL_ENABLED", "true").lower() == "true",
@@ -85,6 +105,11 @@ TOOLS_CONFIG = {
     "wiki_enabled": os.getenv("WIKI_ENABLED", "true").lower() == "true",
     "wiki_api_base": os.getenv("WIKI_API_BASE", "https://www.wikidata.org/w/api.php"),
     "wiki_lang": os.getenv("WIKI_LANG", "zh"),
+    # 可配置的 MediaWiki 源（JSON 数组）。用于接入部署网络上真正可达的 wiki，
+    # 例如 CN 可达的 Minecraft Wiki 镜像：
+    #   [{"name":"mcwiki","api_base":"https://wiki.biligame.com/mc/api.php","label":"Minecraft Wiki"}]
+    # 会自动注册 <name>_search / <name>_page 两个工具。
+    "mediawiki_sites": _env_json("MEDIAWIKI_SITES"),
     # ---- 币价：Gate.io 主、CoinEx 备（CoinGecko/Binance/OKX 实测超时）----
     "crypto_enabled": os.getenv("CRYPTO_ENABLED", "true").lower() == "true",
     "crypto_api_base": os.getenv("CRYPTO_API_BASE", "https://api.gateio.ws"),

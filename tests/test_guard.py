@@ -251,7 +251,7 @@ class TestHubIntegration(unittest.TestCase):
         asyncio.run(hub.call("limited", {}))
         reviews_after_first = len(post.requests)
         blocked = asyncio.run(hub.call("limited", {}))
-        self.assertIn("每分钟最多 1 次", blocked)
+        self.assertIn("本分钟额度已用完", blocked)
         self.assertEqual(len(post.requests), reviews_after_first, "超限的调用不应再走审查")
 
     def test_build_hub_attaches_guard(self):

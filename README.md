@@ -57,7 +57,12 @@ reAct ──function_call──▶ alive-buddy 的 RemoteTool ──POST /tools/
 | `wiki_lookup` | Wikidata 实体资料：多语言名称、简介、类型/职业/创立时间等关键属性 |
 | `crypto_price` | 加密货币现货价与 24h 涨跌（Gate.io 主、CoinEx 备） |
 
-护栏：单工具每分钟/每天次数、全天总量、单次超时；任何失败都降级成一段可读文本，
+> **部署网络实测补充**：`www.wikidata.org` 在**开发机可达、在云服务器不可达**——
+> 同一个源在不同机器上结论可能相反，上线后务必按下面「部署网络实测」逐项核对。
+> 数据源连续失败时由**熔断器**兜底（`TOOL_CIRCUIT_THRESHOLD`，默认连续 3 次失败即停用 10 分钟），
+> 避免对着不通的接口反复白等（每次超时都会白烧一个 timeout + 一轮 LLM）。
+
+护栏：单工具每分钟/每天次数、全天总量、单次超时、连续失败熔断；任何失败都降级成一段可读文本，
 让角色自然地表示"查不到"，而不是把 reAct 打挂。**默认不截断、不过滤工具结果**
 （`TOOL_RESULT_MAX_CHARS=0`），只有想压 token 成本时才设上限。
 
@@ -71,6 +76,8 @@ reAct ──function_call──▶ alive-buddy 的 RemoteTool ──POST /tools/
 | `www.wikidata.org/w/api.php` | ✅ 通（**维基百科正文域名不通**，所以"维基"落在 Wikidata 上） |
 | `api.gateio.ws` / `api.coinex.com` | ✅ 通 |
 | `zh.wikipedia.org` / `api.wikimedia.org` | ❌ 超时 |
+| `wiki.biligame.com/mc`（B站 Minecraft Wiki 镜像） | ✅ 通（未装 TextExtracts，走 `action=parse`） |
+| `minecraft.huijiwiki.com` / `zh.minecraft.wiki` | ❌ 403（WAF 拦非浏览器请求，换 UA 也拦） |
 | CoinGecko / Binance / OKX / Kraken / HTX / MEXC / Bitget | ❌ 超时 |
 
 要换成自己的镜像或代理，只需改 `WIKI_API_BASE` / `CRYPTO_API_BASE` 等 env，无需改代码。

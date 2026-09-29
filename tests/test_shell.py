@@ -305,7 +305,7 @@ class TestRegistration(unittest.TestCase):
                 first = await hub.call("readonly_shell", {"command": "date -u"})
                 self.assertNotIn("没有执行", first)
                 second = await hub.call("readonly_shell", {"command": "date -u"})
-                self.assertIn("每分钟最多 1 次", second)
+                self.assertIn("本分钟额度已用完", second)
             finally:
                 await hub.aclose()
 
@@ -348,7 +348,7 @@ class TestRateLimitSemantics(unittest.TestCase):
             try:
                 self.assertNotIn("超限", await hub.call("readonly_shell", {"command": "whoami"}))
                 self.assertNotIn("超限", await hub.call("readonly_shell", {"command": "whoami"}))
-                self.assertIn("每分钟最多 2 次", await hub.call("readonly_shell", {"command": "whoami"}))
+                self.assertIn("本分钟额度已用完", await hub.call("readonly_shell", {"command": "whoami"}))
             finally:
                 await hub.aclose()
 
@@ -359,4 +359,4 @@ class TestRateLimitSemantics(unittest.TestCase):
         hub.register(Tool(name="t", description="d", parameters={},
                           handler=lambda a: asyncio.sleep(0, result="ok")))
         self.assertEqual(asyncio.run(hub.call("t", {})), "ok")
-        self.assertIn("每分钟最多 1 次", asyncio.run(hub.call("t", {})))
+        self.assertIn("本分钟额度已用完", asyncio.run(hub.call("t", {})))

@@ -97,6 +97,9 @@ class ToolHub:
         self._lock = asyncio.Lock()
         self.mcp_clients: List = []  # 由 mcp.register_mcp_tools 填充，用于关闭长连接
         self.guard = None  # connector.guard.ToolGuard，在 build_hub 里装配
+        # 熔断状态：连续失败达到阈值就暂时停用该工具，避免对着不通的数据源反复白等
+        self._failures: Dict[str, int] = defaultdict(int)
+        self._open_until: Dict[str, float] = {}
         self.guard_broken = False  # 审查层装配失败：受审工具按保守策略拒绝
 
     # ---- 注册与导出 ----
@@ -139,7 +142,8 @@ class ToolHub:
         if self.config["daily_total"] and len(self._total_day) >= self.config["daily_total"]:
             return f"今日全部工具调用已达上限（{self.config['daily_total']} 次），请不要再调用工具。"
         if per_minute and len(usage.minute) >= per_minute:  # 0 视为不限
-            return f"工具 {tool.name} 每分钟最多 {per_minute} 次，已超限，请稍后再试或换个思路。"
+            return (f"工具 {tool.name} 本分钟额度已用完（最多 {per_minute} 次）。"
+                    "**立刻重试不会成功**，请改用其他工具或直接开口说话。")
         if per_day and len(usage.day) >= per_day:
             return f"工具 {tool.name} 今日调用已达上限（{per_day} 次）。"
 
@@ -147,6 +151,40 @@ class ToolHub:
         usage.day.append(now)
         self._total_day.append(now)
         return None
+
+    # ---- 熔断 ----
+
+    def _circuit_message(self, name: str) -> Optional[str]:
+        """熔断打开时返回一句立刻可读的话（不再发起真实请求）。"""
+        until = self._open_until.get(name)
+        if until is None:
+            return None
+        now = self._clock()
+        if now >= until:
+            # 冷却结束：半开，放行一次探测
+            self._open_until.pop(name, None)
+            self._failures[name] = self._failures.get(name, 0) - 1 if self._failures.get(name) else 0
+            return None
+        left = int(until - now)
+        return (
+            f"工具 {name} 最近连续失败多次（数据源可能不通），已暂时停用，约 {left} 秒后自动重试。"
+            "**立刻重试不会成功**，请改用其他工具，或直接基于已知信息说话。"
+        )
+
+    def _record_success(self, name: str):
+        self._failures[name] = 0
+        self._open_until.pop(name, None)
+
+    def _record_failure(self, name: str, why: str):
+        threshold = int(self.config.get("circuit_threshold") or 0)
+        self._failures[name] = self._failures.get(name, 0) + 1
+        if threshold and self._failures[name] >= threshold:
+            cooldown = float(self.config.get("circuit_cooldown") or 600)
+            self._open_until[name] = self._clock() + cooldown
+            logger.warning(
+                f"[Tool] {name} 连续失败 {self._failures[name]} 次（{why}），"
+                f"熔断 {cooldown:g}s，期间不再发起请求"
+            )
 
     # ---- 调用 ----
 
@@ -164,6 +202,11 @@ class ToolHub:
 
         args = arguments or {}
 
+        drained = self._circuit_message(name)
+        if drained:
+            logger.warning(f"[Tool] 熔断中，跳过 {name}")
+            return drained
+
         # 模型审查层：白名单挡的是"机制上不可能"，这一层挡的是"机制合法但意图可疑"
         needs_review = tool.guarded or (self.guard is not None and self.guard.should_review(name))
         if self.guard_broken and needs_review:
@@ -178,14 +221,17 @@ class ToolHub:
         logger.info(f"[Tool] 调用 {name} args={str(args)[:160]}")
         try:
             result = await asyncio.wait_for(tool.handler(args), timeout=self.config["timeout"] + 3)
+            self._record_success(name)
             text = truncate(result, self.config["result_max_chars"])
             elapsed = self._clock() - started
             logger.info(f"[Tool] 完成 {name} 用时 {elapsed:.1f}s 返回 {len(text)} 字")
             return text
         except asyncio.TimeoutError:
+            self._record_failure(name, "超时")
             logger.warning(f"[Tool] {name} 超时")
             return f"工具 {name} 超时未返回（{self.config['timeout']}s），这个方向暂时查不到，换个方式吧。"
         except Exception as e:
+            self._record_failure(name, type(e).__name__)
             logger.warning(f"[Tool] {name} 失败: {e}")
             return f"工具 {name} 执行失败：{e}"
 

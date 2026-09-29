@@ -98,7 +98,8 @@ class TestHubMechanics(unittest.TestCase):
         self.assertEqual(asyncio.run(hub.call("t", {})), "ok")
         self.assertEqual(asyncio.run(hub.call("t", {})), "ok")
         blocked = asyncio.run(hub.call("t", {}))
-        self.assertIn("每分钟最多 2 次", blocked)
+        self.assertIn("本分钟额度已用完", blocked)
+        self.assertIn("立刻重试不会成功", blocked)
 
         now[0] += 61  # 窗口滑过后恢复
         self.assertEqual(asyncio.run(hub.call("t", {})), "ok")
@@ -349,3 +350,157 @@ class TestMcpClientEndToEnd(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCircuitBreaker(unittest.TestCase):
+    """数据源连续失败时熔断：不再对着不通的接口反复白等（每次超时都白烧 12s + 一轮 LLM）。"""
+
+    def make_hub(self, now, threshold=3, cooldown=600):
+        config = tool_config(enabled=True, per_minute=0, per_day=0, daily_total=0,
+                             circuit_threshold=threshold, circuit_cooldown=cooldown)
+        hub = ToolHub(config, clock=lambda: now[0])
+        calls = []
+
+        async def flaky(args):
+            calls.append(1)
+            raise requests.ConnectionError("Network is unreachable")
+
+        async def ok(args):
+            calls.append(1)
+            return "正常结果"
+
+        hub.register(Tool(name="flaky", description="d", parameters={}, handler=flaky))
+        hub.register(Tool(name="ok", description="d", parameters={}, handler=ok))
+        return hub, calls
+
+    def test_opens_after_threshold_and_stops_calling(self):
+        now = [1000.0]
+        hub, calls = self.make_hub(now, threshold=3)
+
+        for _ in range(3):
+            self.assertIn("执行失败", asyncio.run(hub.call("flaky", {})))
+        self.assertEqual(len(calls), 3)
+
+        blocked = asyncio.run(hub.call("flaky", {}))
+        self.assertIn("已暂时停用", blocked)
+        self.assertIn("立刻重试不会成功", blocked)
+        self.assertEqual(len(calls), 3, "熔断期间不应再发起真实请求")
+
+    def test_recovers_after_cooldown(self):
+        now = [1000.0]
+        hub, calls = self.make_hub(now, threshold=2, cooldown=60)
+        asyncio.run(hub.call("flaky", {}))
+        asyncio.run(hub.call("flaky", {}))
+        self.assertIn("已暂时停用", asyncio.run(hub.call("flaky", {})))
+
+        now[0] += 61  # 冷却结束 → 半开，放行一次探测
+        self.assertIn("执行失败", asyncio.run(hub.call("flaky", {})))
+        self.assertEqual(len(calls), 3)
+
+    def test_success_resets_failure_counter(self):
+        now = [1000.0]
+        hub, calls = self.make_hub(now, threshold=3)
+        asyncio.run(hub.call("flaky", {}))
+        asyncio.run(hub.call("flaky", {}))
+        hub._record_success("flaky")   # 中间成功一次
+        asyncio.run(hub.call("flaky", {}))
+        asyncio.run(hub.call("flaky", {}))
+        # 计数被清零过，所以还没到 3 次连续失败
+        self.assertNotIn("已暂时停用", asyncio.run(hub.call("flaky", {})))
+
+    def test_other_tools_unaffected(self):
+        now = [1000.0]
+        hub, calls = self.make_hub(now, threshold=1)
+        asyncio.run(hub.call("flaky", {}))
+        self.assertIn("已暂时停用", asyncio.run(hub.call("flaky", {})))
+        self.assertEqual(asyncio.run(hub.call("ok", {})), "正常结果")
+
+    def test_circuit_can_be_disabled(self):
+        now = [1000.0]
+        hub, calls = self.make_hub(now, threshold=0)
+        for _ in range(5):
+            asyncio.run(hub.call("flaky", {}))
+        self.assertEqual(len(calls), 5, "threshold=0 表示不熔断")
+
+
+class TestMediaWikiProvider(unittest.TestCase):
+    """可配置 MediaWiki 源：优先 TextExtracts，没装该扩展时退回解析 HTML。"""
+
+    def test_html_to_text_strips_markup(self):
+        html = '<div class="mw-parser-output"><p>末影龙是<b>Boss</b>。</p><script>x()</script>'
+        text = native._html_to_text(html)
+        self.assertIn("末影龙是Boss。", text)
+        self.assertNotIn("<b>", text)
+        self.assertNotIn("x()", text)
+
+    def test_html_entities_are_unescaped(self):
+        self.assertIn("A & B", native._html_to_text("<p>A &amp; B</p>"))
+
+    def test_extracts_path_used_when_supported(self):
+        calls = []
+
+        async def fake_fetch(url, params=None, timeout=None):
+            calls.append(params.get("action"))
+            return {"query": {"pages": {"1": {"title": "末影龙", "extract": "末影龙是终界之主。"}}}}
+
+        result = asyncio.run(native.mediawiki_page({"title": "末影龙"}, {}, "http://x/api.php", "测试wiki", fetcher=fake_fetch))
+        self.assertIn("终界之主", result)
+        self.assertEqual(calls, ["query"], "支持 extracts 时不应再多打一次 parse")
+
+    def test_parse_fallback_when_extracts_unsupported(self):
+        calls = []
+
+        async def fake_fetch(url, params=None, timeout=None):
+            calls.append(params.get("action"))
+            if params["action"] == "query":
+                # 该 wiki 没装 TextExtracts：只回页面存在，没有 extract
+                return {"batchcomplete": "", "warnings": {"query": {"*": "Unrecognized value for parameter \"prop\": extracts"}},
+                        "query": {"pages": {"12394": {"pageid": 12394, "ns": 0, "title": "末影龙"}}}}
+            return {"parse": {"title": "末影龙", "text": {"*": "<p>末影龙（Ender Dragon）是<b>Boss</b>生物。</p>"}}}
+
+        result = asyncio.run(native.mediawiki_page({"title": "末影龙"}, {}, "http://x/api.php", "Minecraft Wiki", fetcher=fake_fetch))
+        self.assertIn("Boss", result)
+        self.assertNotIn("<b>", result)
+        self.assertEqual(calls, ["query", "parse"], "应退回 parse")
+
+    def test_missing_page_is_graceful(self):
+        async def fake_fetch(url, params=None, timeout=None):
+            return {"query": {"pages": {"-1": {"title": "不存在", "missing": ""}}}}
+
+        result = asyncio.run(native.mediawiki_page({"title": "不存在"}, {}, "http://x/api.php", "测试wiki", fetcher=fake_fetch))
+        self.assertIn("没有", result)
+
+    def test_search_uses_opensearch(self):
+        async def fake_fetch(url, params=None, timeout=None):
+            self.assertEqual(params["action"], "opensearch")
+            return ["末影", ["末影龙", "末影人"], ["", ""], ["http://x/1", "http://x/2"]]
+
+        result = asyncio.run(native.mediawiki_search({"query": "末影"}, {}, "http://x/api.php", "测试wiki", fetcher=fake_fetch))
+        self.assertIn("末影龙", result)
+        self.assertIn("末影人", result)
+
+    def test_registration_from_config(self):
+        config = tool_config(
+            enabled=True,
+            mediawiki_sites=[{"name": "mcwiki", "api_base": "http://x/api.php", "label": "Minecraft Wiki"}],
+            moegirl_enabled=False, wiki_enabled=False, crypto_enabled=False,
+        )
+        hub = ToolHub(config)
+        native.register_native_tools(hub)
+        self.assertIn("mcwiki_search", hub.tool_names())
+        self.assertIn("mcwiki_page", hub.tool_names())
+
+    def test_incomplete_site_config_is_skipped(self):
+        config = tool_config(enabled=True, mediawiki_sites=[{"name": "bad"}],
+                             moegirl_enabled=False, wiki_enabled=False, crypto_enabled=False)
+        hub = ToolHub(config)
+        native.register_native_tools(hub)
+        self.assertEqual(hub.tool_names(), [])
+
+    def test_invalid_env_json_is_ignored(self):
+        from connector.config import _env_json
+        os.environ["TEST_BAD_JSON"] = "{not json"
+        try:
+            self.assertEqual(_env_json("TEST_BAD_JSON"), [])
+        finally:
+            os.environ.pop("TEST_BAD_JSON", None)

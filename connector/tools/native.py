@@ -5,12 +5,20 @@
 MCP 只是多一跳进程，救不了被墙的域名。这里直接做 HTTP provider，
 base_url 全部可配，将来要换镜像或挂代理只需改 env。
 """
+import html as html_module
+import json
+import re
 from typing import List
+
+from functools import partial
 
 from ..logger import setup_logger
 from .hub import Tool, ToolHub, json_get, truncate
 
 logger = setup_logger("tools.native")
+
+# 工具名只允许 ^[a-zA-Z0-9_-]+$（OpenAI function 命名规则）
+_SAFE_NAME = re.compile(r"[^a-zA-Z0-9_-]")
 
 
 # ---------------------------------------------------------------- 萌娘百科
@@ -74,6 +82,103 @@ async def moegirl_page(args: dict, config: dict) -> str:
     if not extract:
         return f"萌娘百科条目「{page.get('title')}」没有可读的纯文本摘要。"
     return f"萌娘百科《{page.get('title')}》开头：\n{extract}"
+
+
+# ---------------------------------------------------------------- 通用 MediaWiki
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"[ \t\r\f\v]+")
+_BLANK_RE = re.compile(r"\n{3,}")
+
+
+def _html_to_text(html: str) -> str:
+    """把 MediaWiki `action=parse` 返回的 HTML 近似转成纯文本（不引入 bs4 依赖）。
+
+    只做够用的清理：去 script/style、去标签、解实体、压空白。
+    信息不做删减——宁可留一点导航噪音，也不要丢掉正文。
+    """
+    if not html:
+        return ""
+    html = re.sub(r"(?is)<(script|style|table)[^>]*>.*?</\1>", " ", html)
+    html = re.sub(r"(?i)<br\s*/?>", "\n", html)
+    html = re.sub(r"(?i)</(p|div|li|h[1-6])>", "\n", html)
+    text = _TAG_RE.sub("", html)
+    text = html_module.unescape(text)
+    text = _WS_RE.sub(" ", text)
+    text = _BLANK_RE.sub("\n\n", text)
+    return text.strip()
+
+
+def _extracts_supported(data: dict) -> bool:
+    """判断这次响应是真的给了 extract，还是该 wiki 没装 TextExtracts 扩展。"""
+    pages = ((data.get("query") or {}).get("pages") or {}) if isinstance(data, dict) else {}
+    for page in pages.values():
+        if isinstance(page, dict) and page.get("extract"):
+            return True
+    return False
+
+
+async def mediawiki_search(args: dict, config: dict, api_base: str, label: str, fetcher=None) -> str:
+    """按关键词找条目名（走 opensearch，各 wiki 通用）。"""
+    fetch = fetcher or json_get
+    query = str(args.get("query") or "").strip()
+    limit = max(1, min(int(args.get("limit") or 5), 10))
+    if not query:
+        return "需要提供 query（要搜的条目名或关键词）。"
+
+    data = await fetch(api_base, {
+        "action": "opensearch", "format": "json", "search": query,
+        "limit": limit, "namespace": 0, "redirects": "resolve",
+    })
+    if not isinstance(data, list) or len(data) < 2 or not data[1]:
+        return f"{label}没有找到与「{query}」相关的条目。"
+    titles = data[1]
+    descs = data[2] if len(data) > 2 and isinstance(data[2], list) else []
+    urls = data[3] if len(data) > 3 and isinstance(data[3], list) else []
+
+    lines = [f"{label}候选（共 {len(titles)} 条）："]
+    for i, title in enumerate(titles):
+        desc = descs[i] if i < len(descs) and descs[i] else ""
+        url = urls[i] if i < len(urls) else ""
+        lines.append(f"{i + 1}. {title}{f'——{desc}' if desc else ''}{f'（{url}）' if url else ''}")
+    lines.append("要读正文请用对应的 page 工具传条目名。")
+    return "\n".join(lines)
+
+
+async def mediawiki_page(args: dict, config: dict, api_base: str, label: str, fetcher=None) -> str:
+    """读取条目开头：优先用 TextExtracts；该扩展没开就退回 action=parse 再转文本。"""
+    fetch = fetcher or json_get
+    title = str(args.get("title") or "").strip()
+    if not title:
+        return "需要提供 title（条目名，可先搜一下）。"
+
+    data = await fetch(api_base, {
+        "action": "query", "format": "json", "prop": "extracts",
+        "explaintext": 1, "exintro": 1, "redirects": 1, "titles": title,
+    })
+
+    pages = ((data.get("query") or {}).get("pages") or {})
+    if pages:
+        page = next(iter(pages.values()))
+        if "missing" in page:
+            return f"{label}没有「{title}」这个条目（可先搜准确名称）。"
+        if _extracts_supported(data):
+            extract = str(page.get("extract")).strip()
+            return f"{label}《{page.get('title')}》开头：\n{extract}"
+
+    # 该 wiki 没启用 TextExtracts（例如 B站 Minecraft Wiki）→ 退回解析 HTML
+    parsed = await fetch(api_base, {
+        "action": "parse", "format": "json", "page": title,
+        "prop": "text", "section": 0, "redirects": 1,
+    })
+    if not isinstance(parsed, dict) or "parse" not in parsed:
+        detail = ((parsed or {}).get("error") or {}).get("info") if isinstance(parsed, dict) else None
+        return f"{label}没有「{title}」这个条目" + (f"（{detail}）" if detail else "。")
+    parsed_page = parsed["parse"]
+    text = _html_to_text(str(parsed_page.get("text", {}).get("*", "")))
+    if not text:
+        return f"{label}《{parsed_page.get('title', title)}》没有可读的正文。"
+    return f"{label}《{parsed_page.get('title', title)}》开头：\n{text}"
 
 
 # ---------------------------------------------------------------- 维基 / Wikidata
@@ -362,6 +467,32 @@ def register_native_tools(hub: ToolHub):
             },
             handler=bind(wiki_lookup),
         ))
+
+    for site in config.get("mediawiki_sites") or []:
+        name = _SAFE_NAME.sub("_", str(site.get("name") or "")).strip("_")[:32]
+        api_base = str(site.get("api_base") or "").strip()
+        if not name or not api_base:
+            logger.warning(f"[Tools] 跳过不完整的 MediaWiki 站点配置: {site}")
+            continue
+        label = str(site.get("label") or name)
+        hub.register(Tool(
+            name=f"{name}_search",
+            description=f"在{label}搜索条目，返回候选条目名。",
+            parameters={"type": "object", "properties": {
+                "query": {"type": "string", "description": "关键词"},
+                "limit": {"type": "integer", "description": "返回数量，默认 5"}},
+                "required": ["query"]},
+            handler=partial(mediawiki_search, api_base=api_base, label=label),
+        ))
+        hub.register(Tool(
+            name=f"{name}_page",
+            description=f"读取{label}某个条目的开头正文。",
+            parameters={"type": "object", "properties": {
+                "title": {"type": "string", "description": "条目名，建议先搜准确"}},
+                "required": ["title"]},
+            handler=partial(mediawiki_page, api_base=api_base, label=label),
+        ))
+        logger.info(f"[Tools] 已接入 MediaWiki 站点 {name}（{api_base}）")
 
     if config["crypto_enabled"]:
         hub.register(Tool(
