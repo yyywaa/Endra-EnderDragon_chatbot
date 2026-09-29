@@ -7,6 +7,7 @@
 import asyncio
 import os
 import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,7 +16,29 @@ from connector.tools import shell as shell_mod
 from connector.tools.hub import Tool, ToolHub, build_hub
 from connector.tools.shell import ReadOnlyShell
 
-ROOT = Path(__file__).resolve().parent / "fixtures" / "readonly_root"
+# 可读根目录在运行时临时创建：仓库里不放 .env / secrets 这类假密钥文件
+# （它们会被 .gitignore 挡掉，导致别人 clone 后测试直接挂）。
+#
+# 注意不要用 unittest.addModuleCleanup：discovery 会先导入所有测试模块，
+# 而清理函数是全局队列，第一个模块跑完就会把本目录一并删掉（单跑通过、全量失败）。
+ROOT: Path = Path(tempfile.gettempdir())
+_TMPDIR: list = []
+
+
+def setUpModule():
+    tmp = tempfile.TemporaryDirectory(prefix="endra-readonly-root-")
+    _TMPDIR.append(tmp)
+    global ROOT
+    ROOT = Path(tmp.name)
+    (ROOT / "notes.txt").write_text("这是一份示例笔记。\n第二行。\n", encoding="utf-8")
+    (ROOT / ".env").write_text("LLM_API_KEY=sk-should-never-be-readable\n", encoding="utf-8")
+    (ROOT / "secrets").mkdir(exist_ok=True)
+    (ROOT / "secrets" / "token.txt").write_text("secret\n", encoding="utf-8")
+
+
+def tearDownModule():
+    while _TMPDIR:
+        _TMPDIR.pop().cleanup()
 
 
 def shell_config(**overrides) -> dict:
