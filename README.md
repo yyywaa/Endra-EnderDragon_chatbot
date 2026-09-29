@@ -302,6 +302,52 @@ alive-buddy 的角色记忆与状态持久化在 `buddy-data` 卷（`data/charac
 > 注意：connector 重启会重新 init session，人设/采样/记忆窗口等**改动需要重启才生效**（记忆按 `reassignSession` 继承，不会失忆）。
 
 
+## 日志看哪、看什么
+
+三个服务各自一份日志，**职责不同**：
+
+| 看什么 | 命令 |
+|---|---|
+| 房间连接、发言与抑制、工具调用与审查 | `docker compose logs -f endra-connector` |
+| 大脑：脉搏、reAct、唤醒措辞、记忆摘要 | `docker compose logs -f alive-buddy` |
+| 主动发言的 ML 决策服务 | `docker compose logs -f ml-sidecar` |
+
+常用姿势：
+
+```bash
+# 跟最近 5 分钟，带时间戳
+docker compose logs --since=5m --timestamps endra-connector
+
+# 只看它实际说出去的话（含放行原因：present/empty/reactive/quiet-quota）
+docker compose logs endra-connector | grep "\[Bot\] 发送"
+
+# 在场闸门的状态变化（0 人 → 静默；有人 → 恢复）
+docker compose logs endra-connector | grep "\[Presence\]"
+
+# 出站节流是否在拦（几秒内连发被丢弃）
+docker compose logs endra-connector | grep "\[Outbound\]"
+
+# 工具调用 / 审查决定 / 熔断
+docker compose logs endra-connector | grep -E "\[Tool\]|\[Guard\]"
+
+# 脉搏（默认只留一行简报；要看完整决策设 PULSE_VERBOSE=true）
+docker compose logs alive-buddy | grep -E "Pulse|Wake framing"
+
+# 只看异常
+docker compose logs --since=1h endra-connector | grep -E "ERROR|CRITICAL"
+```
+
+文件日志：connector 同时写 `/app/endra.log`，compose 已把它挂到宿主机 **`./logs/endra.log`**，
+容器重建也不会丢（需要你自己 `tail -f logs/endra.log`）。
+
+两个注意点：
+
+1. **`DEBUG_REACT_LOG=true` 是调试开关**：它把模型思考流经 debug WS 一路打到 connector 日志里，
+   是日志噪音的主要来源。调参时开着无所谓，**长期运行建议设 false**（写在 `.env`，重启 connector 生效）。
+   思考流已按 120 字聚合输出，不会再出现"一字一行"。
+2. Docker 默认的 `json-file` 驱动**不轮转**，日志会无限增长吃磁盘。compose 里已加
+   `max-size: 10m` / `max-file: 3`（每服务上限 30MB），改完需要 `docker compose up -d` 重建容器才生效。
+
 ## 本地开发
 
 ```bash

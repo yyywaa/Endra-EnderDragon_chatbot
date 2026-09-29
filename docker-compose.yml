@@ -6,6 +6,12 @@ services:
       context: ../alive-buddy
       dockerfile: Dockerfile.ml
     restart: unless-stopped
+    logging: &default-logging
+      driver: json-file
+      options:
+        # 默认 json-file 不轮转，日志会无限增长把磁盘吃掉
+        max-size: "10m"
+        max-file: "3"
 
   alive-buddy:
     build:
@@ -29,6 +35,7 @@ services:
     depends_on:
       - ml-sidecar
     restart: unless-stopped
+    logging: *default-logging
 
   endra-connector:
     build: .
@@ -42,9 +49,13 @@ services:
       # readonly_shell 的可读范围：内核级只读挂载。**放进来的一切等于允许 Endra 公开引用**，
       # 不要放密钥、玩家隐私、私有日志。只想让它看系统信息（date/df/free）的话可以删掉这行。
       - ./readonly-data:/app/data/readonly:ro
+      # 文件日志落盘到宿主机（容器内的 /app/endra.log 会随重建消失）。
+      # 与 cookies.json 同理：宿主机必须先有这个文件，否则 Docker 会把挂载点建成目录。
+      - ./logs/endra.log:/app/endra.log
     depends_on:
       - alive-buddy
     restart: unless-stopped
+    logging: *default-logging
 
 volumes:
   buddy-data:
