@@ -407,10 +407,6 @@ class TestQuietRoomDailyBehaviour(unittest.TestCase):
         self.assertFalse(room._was_quiet)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestSystemPromptMandates(unittest.TestCase):
     """人设提示词里的几条硬要求不能在后人改动中被悄悄删掉。"""
 
@@ -611,51 +607,42 @@ class TestOutboundThrottle(unittest.TestCase):
 
 
 class TestDragonVoice(unittest.TestCase):
-    """人设必须把"龙"的坐标写死，防止再退化成学者/讲解员腔。"""
+    """人设只要求它"想清楚一个博学傲慢的末影龙王会怎么说话"，不指定腔调。"""
 
     def setUp(self):
         from connector.config import SYSTEM_PROMPT_TEMPLATE
         self.prompt = SYSTEM_PROMPT_TEMPLATE
 
-    def test_voice_section_exists_with_three_anchors(self):
-        self.assertIn("Voice — 要像龙，不要像学者", self.prompt)
-        for anchor in ("尺度是你的", "身体是你的", "主权是你的"):
-            self.assertIn(anchor, self.prompt)
+    def test_states_the_deliberation_question(self):
+        self.assertIn("先想清楚你是谁，再开口", self.prompt)
+        self.assertIn(
+            "一个博学傲慢的末影龙王，在这个时候、对这个人、说这件事，会怎么说话？",
+            self.prompt,
+        )
+        self.assertIn("想清楚了再开口", self.prompt)
 
-    def test_lecturer_register_is_banned(self):
-        self.assertIn("反面清单", self.prompt)
-        for banned in ("值得一提", "事实上", "有趣的是", "讲解员"):
-            self.assertIn(banned, self.prompt)
-        self.assertIn("不要总结句", self.prompt)
+    def test_leaves_the_choice_to_it(self):
+        self.assertIn("没有规定你这次该用哪种腔调", self.prompt)
+        self.assertIn("而不是一个助手、或一个学者会说的话", self.prompt)
 
-    def test_has_dragon_vs_scholar_contrast_examples(self):
-        self.assertIn("同一件事，两种说法", self.prompt)
-        self.assertIn("学者腔：", self.prompt)
-        self.assertIn("孤独是你们发明的东西", self.prompt, "应给出龙的示范句")
+    def test_character_anchor_present(self):
+        self.assertIn("末影龙王", self.prompt)
+        self.assertIn("博学、傲慢、懒得解释", self.prompt)
+        self.assertIn("看人类像看蚂蚁搬家", self.prompt)
 
-    def test_brevity_is_explicit(self):
-        self.assertIn("最多三句", self.prompt)
-        self.assertIn("龙不做演讲", self.prompt)
+    def test_no_register_table_or_rotation_rules(self):
+        """曾经错误地做成"六嗓子轮值"与"场合映射表"，均已撤掉——那是在替它决定腔调。"""
+        for removed in ("连用三次算失败", "轮值的班表", "腔调跟着场合走",
+                        "Registers — 你有好几副嗓子", "君王腔", "野兽腔", "老贵族腔",
+                        "反面清单"):
+            self.assertNotIn(removed, self.prompt, f"不该再有这种指定：{removed}")
 
-    def test_one_thing_per_utterance(self):
-        self.assertIn("只交付一件", self.prompt)
-
-    def test_voice_is_chosen_by_occasion_not_by_rotation(self):
-        """腔调看场合合身，不是轮值的班表（曾错误地做成机械轮换）。"""
-        self.assertIn("腔调跟着场合走", self.prompt)
-        self.assertIn("不是轮流用", self.prompt)
-        self.assertIn("不要为了", self.prompt)
-        self.assertIn("不是轮值的班表", self.prompt)
-
-    def test_humanities_topics_invite_the_scholar_voice_and_lookup(self):
-        self.assertIn("谈人类的知识、历史、技艺、传闻", self.prompt)
-        self.assertIn("学者腔", self.prompt)
-        self.assertIn("去查", self.prompt)
-
-    def test_dragon_topics_speak_as_the_dragon_itself(self):
-        self.assertIn("你就是末影龙", self.prompt)
-        self.assertIn("绝不要用人类学者的口吻讲你自己", self.prompt)
-        self.assertIn("mcwiki", self.prompt, "谈末地记载时可以查 Minecraft Wiki")
-
-    def test_brevity_applies_to_every_register(self):
+    def test_three_bottom_lines_kept(self):
+        self.assertIn("三条底线不变", self.prompt)
         self.assertIn("不超过三句", self.prompt)
+        self.assertIn("具体优先于修辞", self.prompt)
+        self.assertIn("同一个意思不换措辞说第二遍", self.prompt)
+
+
+if __name__ == "__main__":
+    unittest.main()
